@@ -16,7 +16,6 @@
 #include "Module.hpp"
 #include "SymmetryConstraint.hpp"
 #include "../Logger.hpp"
-#include "BStarTree.hpp"
 
 /**
  * @brief Automatically Symmetry-Feasible B*-tree (ASF-B*-tree)
@@ -70,8 +69,15 @@ public:
     std::vector<BStarNode*> inorderTraversal;
     
     // Contour data structure for packing
-    SegmentTree<int> contourSegTree;
-    int maxContourWidth; // Maximum possible width for contour
+    struct ContourPoint {
+        int x;
+        int height;
+        ContourPoint* next;
+        
+        ContourPoint(int x, int height) : x(x), height(height), next(nullptr) {}
+    };
+    
+    ContourPoint* contourHead;
     
     /**
      * Constructor
@@ -80,7 +86,7 @@ public:
      * @param modules Map of all modules
      */
     ASFBStarTree(std::shared_ptr<SymmetryGroup> symmetryGroup, const std::map<std::string, std::shared_ptr<Module>>& modules)
-        : symmetryGroup(symmetryGroup), modules(modules), root(nullptr), symmetryAxisPosition(-1) {
+        : symmetryGroup(symmetryGroup), modules(modules), root(nullptr), contourHead(nullptr), symmetryAxisPosition(-1) {
         
         // Initialize module relationships
         initializeRepresentatives();
@@ -272,23 +278,12 @@ public:
      * Clears the contour data structure
      */
     void clearContour() {
-        // Calculate maximum possible width for all modules
-        maxContourWidth = 0;
-        
-        // Account for all modules in this symmetry group
-        for (const auto& pair : modules) {
-            if (pair.second) {
-                maxContourWidth += pair.second->getWidth();
-            }
+        while (contourHead != nullptr) {
+            ContourPoint* temp = contourHead;
+            contourHead = contourHead->next;
+            delete temp;
         }
-        
-        // Add some buffer to be safe
-        maxContourWidth *= 2;
-        
-        // Initialize segment tree with appropriate size
-        contourSegTree.init(maxContourWidth);
-        
-        Logger::log("Initialized ASF-B*-tree contour segment tree with width " + std::to_string(maxContourWidth));
+        contourHead = nullptr;
     }
     
     /**
@@ -300,14 +295,16 @@ public:
      * Gets the height of the contour at a given x-coordinate
      */
     int getContourHeight(int x) {
-        // Bounds checking
-        if (x < 0 || x >= maxContourWidth) {
-            Logger::log("WARNING: ASF-B*-tree contour query out of bounds: " + std::to_string(x));
-            return 0;
+        if (contourHead == nullptr) return 0;
+        
+        ContourPoint* curr = contourHead;
+        
+        // Find the last point with x <= target x
+        while (curr->next != nullptr && curr->next->x <= x) {
+            curr = curr->next;
         }
         
-        // Query segment tree for height at x
-        return contourSegTree.query(x, x);
+        return curr->height;
     }
     
     /**

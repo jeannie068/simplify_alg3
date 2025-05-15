@@ -54,29 +54,19 @@ void PlacementSolver::logContour() {
     std::stringstream ss;
     ss << "Current contour: ";
     
-    // Define sampling parameters
-    const int maxSamples = 50; // Maximum number of points to show
-    int samplingInterval = std::max(1, maxContourWidth / maxSamples);
+    // Safely iterate through contour points
+    ContourPoint* current = contourHead;
+    int safetyCounter = 0; // Prevent infinite loops
+    const int maxPoints = 1000; // Reasonable upper limit
     
-    // Track previous height to detect changes
-    int prevHeight = contourSegTree.query(0, 0);
-    ss << "(0," << prevHeight << ") ";
-    
-    // Sample the contour at regular intervals
-    for (int x = samplingInterval; x < maxContourWidth; x += samplingInterval) {
-        int height = contourSegTree.query(x, x);
-        
-        // Always include points where height changes
-        if (height != prevHeight) {
-            ss << "(" << x << "," << height << ") ";
-            prevHeight = height;
-        }
+    while (current != nullptr && safetyCounter < maxPoints) {
+        ss << "(" << current->x << "," << current->height << ") ";
+        current = current->next;
+        safetyCounter++;
     }
     
-    // Always include rightmost point
-    if (maxContourWidth > 0) {
-        int rightHeight = contourSegTree.query(maxContourWidth-1, maxContourWidth-1);
-        ss << "(" << (maxContourWidth-1) << "," << rightHeight << ")";
+    if (safetyCounter >= maxPoints) {
+        ss << " [WARNING: Contour list may be corrupt - too many points]";
     }
     
     logGlobalPlacement(ss.str());
@@ -113,7 +103,7 @@ void PlacementSolver::printBStarTree(BStarNode* node, std::string prefix, bool i
 
 // Constructor
 PlacementSolver::PlacementSolver()
-    : bstarRoot(nullptr),
+    : bstarRoot(nullptr), contourHead(nullptr),
       solutionArea(0), solutionWirelength(0),
       bestSolutionArea(std::numeric_limits<int>::max()), bestSolutionWirelength(0),
       initialTemperature(1000.0), finalTemperature(0.1),
@@ -143,103 +133,122 @@ PlacementSolver::~PlacementSolver() {
     }
 }
 
+// Cleanup B*-tree
+void PlacementSolver::cleanupBStarTree(BStarNode* node) {
+    if (node == nullptr) return;
+    
+    cleanupBStarTree(node->left);
+    cleanupBStarTree(node->right);
+    delete node;
+}
+
 // Clear contour data structure
 void PlacementSolver::clearContour() {
-    // Calculate maximum possible width for all modules
-    maxContourWidth = 0;
-    
-    // Account for regular modules
-    for (const auto& pair : regularModules) {
-        if (pair.second) {
-            maxContourWidth += pair.second->getWidth();
-        }
+    while (contourHead != nullptr) {
+        ContourPoint* temp = contourHead;
+        contourHead = contourHead->next;
+        delete temp;
     }
-    
-    // Account for symmetry islands
-    for (const auto& island : symmetryIslands) {
-        if (island) {
-            maxContourWidth += island->getWidth();
-        }
-    }
-    
-    // Add some buffer to be safe
-    maxContourWidth *= 2;
-    
-    // Initialize segment tree with appropriate size
-    contourSegTree.init(maxContourWidth);
-    
-    logGlobalPlacement("Initialized contour segment tree with width " + std::to_string(maxContourWidth));
+    contourHead = nullptr;
 }
 
 // Update contour after placing a module
 void PlacementSolver::updateContour(int x, int y, int width, int height) {
-    // Additional validations
-    if (width <= 0 || height <= 0) {
-        logGlobalPlacement("ERROR: Invalid module dimensions in updateContour: width=" + 
-                          std::to_string(width) + ", height=" + std::to_string(height));
+    int right = x + width;
+    int top = y + height;
+    
+    // Create a new contour point if contour is empty
+    if (contourHead == nullptr) {
+        contourHead = new ContourPoint(x, top);
+        contourHead->next = new ContourPoint(right, 0);
         return;
     }
     
-    // Check if trying to place negative coordinates - this indicates a serious problem
-    if (x < 0 || y < 0) {
-        logGlobalPlacement("ERROR: Cannot place module at negative coordinates: (" + 
-                          std::to_string(x) + "," + std::to_string(y) + ")");
-        if (x < 0) x = 0;
-        if (y < 0) y = 0;
+    // Find the position to insert or update
+    ContourPoint* curr = contourHead;
+    ContourPoint* prev = nullptr;
+    
+    // Skip points to the left of the module
+    while (curr != nullptr && curr->x < x) {
+        prev = curr;
+        curr = curr->next;
     }
     
-    // Bounds checking - limit to valid range
-    int adjX = x;
-    int adjWidth = width;
-    
-    if (adjX + adjWidth > maxContourWidth) {
-        logGlobalPlacement("WARNING: Module extends beyond maximum contour width");
-        // If it's far beyond the bound, we need to increase maxContourWidth
-        if (adjX + adjWidth > maxContourWidth * 1.5) {
-            int newMaxWidth = (adjX + adjWidth) * 2; // Double to avoid frequent resizes
-            logGlobalPlacement("Increasing contour max width from " + 
-                              std::to_string(maxContourWidth) + " to " + 
-                              std::to_string(newMaxWidth));
-            
-            // Save current contour heights
-            std::vector<int> heights;
-            for (int i = 0; i < maxContourWidth; i++) {
-                heights.push_back(contourSegTree.query(i, i));
-            }
-            
-            // Reinitialize contour with new size
-            maxContourWidth = newMaxWidth;
-            contourSegTree.init(maxContourWidth);
-            
-            // Restore previous heights
-            for (int i = 0; i < heights.size(); i++) {
-                if (heights[i] > 0) {
-                    contourSegTree.update(i, i, heights[i]);
-                }
-            }
+    // Update or insert points for the module
+    if (curr == nullptr || curr->x > right) {
+        // Module is beyond the current contour
+        ContourPoint* newPoint = new ContourPoint(x, top);
+        newPoint->next = new ContourPoint(right, prev ? prev->height : 0);
+        newPoint->next->next = curr;
+        
+        if (prev) {
+            prev->next = newPoint;
         } else {
-            // Otherwise just truncate
-            adjWidth = maxContourWidth - adjX;
+            contourHead = newPoint;
+        }
+    } else {
+        // Module intersects with existing contour
+        if (curr->x > x) {
+            // Insert a new point at the left edge of the module
+            ContourPoint* newPoint = new ContourPoint(x, top);
+            newPoint->next = curr;
+            
+            if (prev) {
+                prev->next = newPoint;
+            } else {
+                contourHead = newPoint;
+            }
+            
+            prev = newPoint;
+        } else if (curr->x == x) {
+            // Update the existing point
+            curr->height = std::max(curr->height, top);
+            prev = curr;
+            curr = curr->next;
+        }
+        
+        // Update or merge intermediate points
+        while (curr != nullptr && curr->x <= right) {
+            if (curr->x == right) {
+                curr->height = std::max(curr->height, top);
+                break;
+            } else {
+                ContourPoint* temp = curr;
+                curr = curr->next;
+                delete temp;
+            }
+        }
+        
+        if (prev) {
+            prev->next = curr;
+        } else {
+            contourHead = curr;
+        }
+        
+        // If we reached the end without finding a point at 'right'
+        if (curr == nullptr || curr->x > right) {
+            ContourPoint* newPoint = new ContourPoint(right, prev ? prev->height : 0);
+            newPoint->next = curr;
+            
+            if (prev) {
+                prev->next = newPoint;
+            } else {
+                contourHead = newPoint;
+            }
         }
     }
+}
+
+// Get height of contour at x-coordinate
+int PlacementSolver::getContourHeight(int x) {
+    if (contourHead == nullptr) return 0;
     
-    int top = y + height;
-    
-    // Get current height at this range
-    int currentHeight = contourSegTree.query(adjX, adjX + adjWidth - 1);
-    
-    // Debug logging for significant height increase
-    int heightIncrease = top - currentHeight;
-    if (heightIncrease > height * 2) {
-        logGlobalPlacement("Large height increase at x=" + std::to_string(adjX) + 
-                          ": " + std::to_string(currentHeight) + " -> " + 
-                          std::to_string(top) + " (+" + std::to_string(heightIncrease) + ")");
+    ContourPoint* curr = contourHead;
+    while (curr->next != nullptr && curr->next->x <= x) {
+        curr = curr->next;
     }
     
-    // Only update if new height is higher
-    if (top > currentHeight) {
-        contourSegTree.update(adjX, adjX + adjWidth - 1, top);
-    }
+    return curr->height;
 }
 
 /**
@@ -412,6 +421,60 @@ void PlacementSolver::buildInitialBStarTree() {
 }
 
 
+// Modified preorder traversal method - stores names instead of pointers
+void PlacementSolver::safePreorder(BStarNode* node) {
+    if (node == nullptr) return;
+    
+    // Store name instead of pointer
+    preorderNodeNames.push_back(node->name);
+    safePreorder(node->left);
+    safePreorder(node->right);
+}
+
+// Modified inorder traversal method - stores names instead of pointers
+void PlacementSolver::safeInorder(BStarNode* node) {
+    if (node == nullptr) return;
+    
+    safeInorder(node->left);
+    // Store name instead of pointer
+    inorderNodeNames.push_back(node->name);
+    safeInorder(node->right);
+}
+
+// Safe preorder traversal for whole BStarTree
+void PlacementSolver::preorder(BStarNode* node) {
+    if (node == nullptr) return;
+    
+    preorderTraversal.push_back(node);
+    preorder(node->left);
+    preorder(node->right);
+}
+
+// Safe inorder traversal for whole BStarTree
+void PlacementSolver::inorder(BStarNode* node) {
+    if (node == nullptr) return;
+    
+    inorder(node->left);
+    inorderTraversal.push_back(node);
+    inorder(node->right);
+}
+
+// Helper method to find a node by name
+PlacementSolver::BStarNode* PlacementSolver::findNodeByName(const std::string& name) {
+    // Traverse the tree to find the node with the given name
+    std::function<BStarNode*(BStarNode*)> find = [&](BStarNode* current) -> BStarNode* {
+        if (current == nullptr) return nullptr;
+        if (current->name == name) return current;
+        
+        BStarNode* leftResult = find(current->left);
+        if (leftResult) return leftResult;
+        
+        return find(current->right);
+    };
+    
+    return find(bstarRoot);
+}
+
 // Fixed packBStarTree function to properly handle BFS traversal
 /**
  * Pack the B*-tree to get the coordinates of all modules and islands
@@ -423,9 +486,7 @@ void PlacementSolver::packBStarTree() {
     
     if (globalDebugEnabled) {
         logGlobalPlacement("======== PACKING GLOBAL B*-TREE ========");
-        // Instead of logContour() we'll log the max height
-        int maxHeight = contourSegTree.query(0, maxContourWidth - 1);
-        logGlobalPlacement("Initial contour max height: " + std::to_string(maxHeight));
+        logContour();
     }
     
     // Validate tree structure before packing
@@ -536,7 +597,7 @@ void PlacementSolver::packBStarTree() {
         // Process left child (placed to the right of current node)
         if (node->left && visited.find(node->left) == visited.end()) {
             int leftX = nodeX + width;
-            int leftY = getContourHeight(leftX);
+            int leftY = nodeY;
             
             // Log before placing
             logGlobalPlacement("Placing left child " + node->left->name + 
@@ -627,9 +688,7 @@ void PlacementSolver::packBStarTree() {
         
         // Log the current contour
         if (globalDebugEnabled) {
-            // Instead of old logContour()
-            int maxHeight = contourSegTree.query(0, maxContourWidth - 1);
-            logGlobalPlacement("Current contour max height: " + std::to_string(maxHeight));
+            logContour();
         }
     }
     
@@ -655,13 +714,64 @@ void PlacementSolver::packBStarTree() {
     inorderNodeNames.clear();
     safePreorder(bstarRoot);
     safeInorder(bstarRoot);
-
-    compactGlobalPlacement();
     
     // Do a final validation to ensure the tree remains valid after packing
     if (!validateBStarTree()) {
         logGlobalPlacement("WARNING: Tree validation failed after packing.");
     }
+}
+
+// Calculate bounding box area
+int PlacementSolver::calculateArea() {
+    int minX = 0;
+    int minY = 0;
+    int maxX = 0;
+    int maxY = 0;
+    
+    // Check symmetry islands
+    for (const auto& island : symmetryIslands) {
+        maxX = std::max(maxX, island->getX() + island->getWidth());
+        maxY = std::max(maxY, island->getY() + island->getHeight());
+    }
+    
+    // Check regular modules
+    for (const auto& pair : regularModules) {
+        const auto& module = pair.second;
+        maxX = std::max(maxX, module->getX() + module->getWidth());
+        maxY = std::max(maxY, module->getY() + module->getHeight());
+    }
+    
+    return maxX * maxY;
+}
+
+// Calculate half-perimeter wirelength (placeholder)
+double PlacementSolver::calculateWirelength() {
+    // This is a placeholder - in a real implementation, you would calculate
+    // the wirelength based on module connectivity information
+    
+    // For this simplified version, we'll use a proxy: sum of distances from modules to the origin
+    double wirelength = 0.0;
+    
+    // Include symmetry islands
+    for (const auto& island : symmetryIslands) {
+        wirelength += island->getX() + island->getY();
+    }
+    
+    // Include regular modules
+    for (const auto& pair : regularModules) {
+        const auto& module = pair.second;
+        wirelength += module->getX() + module->getY();
+    }
+    
+    return wirelength;
+}
+
+// Calculate cost of current solution
+double PlacementSolver::calculateCost() {
+    int area = calculateArea();
+    double wirelength = calculateWirelength();
+    
+    return areaWeight * area + wirelengthWeight * wirelength;
 }
 
 // Perform random perturbation
@@ -706,6 +816,27 @@ bool PlacementSolver::perturb() {
     }
     
     return success;
+}
+
+// Rotate a module
+bool PlacementSolver::rotateModule(bool isSymmetryIsland, const std::string& name) {
+    if (isSymmetryIsland) {
+        // Extract island index
+        size_t islandIndex = std::stoi(name.substr(7));
+        if (islandIndex < symmetryIslands.size()) {
+            // Rotate the symmetry island
+            symmetryIslands[islandIndex]->rotate();
+            return true;
+        }
+    } else {
+        // Rotate a regular module
+        if (regularModules.find(name) != regularModules.end()) {
+            regularModules[name]->rotate();
+            return true;
+        }
+    }
+    
+    return false;
 }
 
 // Move a node in the B*-tree
@@ -848,6 +979,63 @@ bool PlacementSolver::moveNode(BStarNode* node) {
     return true;
 }
 
+// Swap two nodes in the B*-tree
+bool PlacementSolver::swapNodes() {
+    // Need at least 2 nodes
+    if (preorderTraversal.size() < 2) {
+        return false;
+    }
+    
+    // Select two random nodes
+    int idx1 = std::rand() % preorderTraversal.size();
+    int idx2;
+    do {
+        idx2 = std::rand() % preorderTraversal.size();
+    } while (idx1 == idx2);
+    
+    BStarNode* node1 = preorderTraversal[idx1];
+    BStarNode* node2 = preorderTraversal[idx2];
+    
+    // Swap node contents (name and isSymmetryIsland flag)
+    std::swap(node1->name, node2->name);
+    std::swap(node1->isSymmetryIsland, node2->isSymmetryIsland);
+    
+    return true;
+}
+
+// Change representative for a symmetry pair
+bool PlacementSolver::changeRepresentative() {
+    // Select a random symmetry island
+    if (symmetryIslands.empty()) {
+        return false;
+    }
+    
+    size_t islandIndex = std::rand() % symmetryIslands.size();
+    auto island = symmetryIslands[islandIndex];
+    
+    // Get the ASF-B*-tree from the island
+    auto asfBStarTree = island->getASFBStarTree();
+    
+    // Perturb the ASF-B*-tree by changing a representative
+    return asfBStarTree->perturb(3); // Type 3 is "change representative"
+}
+
+// Convert symmetry type for a symmetry group
+bool PlacementSolver::convertSymmetryType() {
+    // Select a random symmetry island
+    if (symmetryIslands.empty()) {
+        return false;
+    }
+    
+    size_t islandIndex = std::rand() % symmetryIslands.size();
+    auto island = symmetryIslands[islandIndex];
+    
+    // Get the ASF-B*-tree from the island
+    auto asfBStarTree = island->getASFBStarTree();
+    
+    // Perturb the ASF-B*-tree by converting symmetry type
+    return asfBStarTree->perturb(4); // Type 4 is "convert symmetry type"
+}
 
 // Added tree validation for PlacementSolver
 /**
@@ -1215,286 +1403,28 @@ bool PlacementSolver::hasOverlaps() {
     return false;
 }
 
-// Add a post-processing step to fix any overlaps that might still occur
-bool PlacementSolver::fixOverlaps() {
-    logGlobalPlacement("Beginning comprehensive overlap fixing process");
+
+// Deep copy of module data
+std::map<std::string, std::shared_ptr<Module>> PlacementSolver::copyModules(
+    const std::map<std::string, std::shared_ptr<Module>>& source) {
     
-    bool hadOverlaps = hasOverlaps();
-    if (!hadOverlaps) {
-        logGlobalPlacement("No overlaps detected, no fixing needed");
-        return true;
+    std::map<std::string, std::shared_ptr<Module>> result;
+    
+    for (const auto& pair : source) {
+        result[pair.first] = std::make_shared<Module>(*pair.second);
     }
     
-    int iterations = 0;
-    const int MAX_ITERATIONS = 10;
-    
-    while (hasOverlaps() && iterations < MAX_ITERATIONS) {
-        iterations++;
-        logGlobalPlacement("Overlap fixing iteration " + std::to_string(iterations));
-        
-        std::vector<ModuleInfo> modules;
-        
-        // Add regular modules
-        for (const auto& pair : regularModules) {
-            if (!pair.second) continue;
-            
-            modules.emplace_back(
-                pair.first,
-                false,
-                pair.second->getX(),
-                pair.second->getY(),
-                pair.second->getWidth(),
-                pair.second->getHeight()
-            );
-        }
-        
-        // Add symmetry islands
-        for (size_t i = 0; i < symmetryIslands.size(); i++) {
-            if (!symmetryIslands[i]) continue;
-            
-            modules.emplace_back(
-                "island_" + std::to_string(i),
-                true,
-                symmetryIslands[i]->getX(),
-                symmetryIslands[i]->getY(),
-                symmetryIslands[i]->getWidth(),
-                symmetryIslands[i]->getHeight()
-            );
-        }
-        
-        logGlobalPlacement("Collected info for " + std::to_string(modules.size()) + " modules");
-        
-        // Stage 2: Sort modules by different criteria to try multiple approaches
-        bool fixed = false;
-        
-        // Approach 1: Sort by area (largest first) and resolve
-        std::sort(modules.begin(), modules.end(), [](const ModuleInfo& a, const ModuleInfo& b) {
-            return a.area > b.area; // Largest first
-        });
-        
-        logGlobalPlacement("Approach 1: Resolving overlaps by module area (largest first)");
-        if (resolveOverlapsInSortedOrder(modules)) {
-            fixed = true;
-            logGlobalPlacement("Approach 1 successfully resolved all overlaps");
-            break;
-        }
-        
-        // Approach 2: Sort by y-coordinate (bottom to top) and resolve
-        std::sort(modules.begin(), modules.end(), [](const ModuleInfo& a, const ModuleInfo& b) {
-            return a.y < b.y;
-        });
-        
-        logGlobalPlacement("Approach 2: Resolving overlaps by y-coordinate (bottom to top)");
-        if (resolveOverlapsInSortedOrder(modules)) {
-            fixed = true;
-            logGlobalPlacement("Approach 2 successfully resolved all overlaps");
-            break;
-        }
-        
-        // Approach 3: Sort by x-coordinate (left to right) and resolve
-        std::sort(modules.begin(), modules.end(), [](const ModuleInfo& a, const ModuleInfo& b) {
-            return a.x < b.x;
-        });
-        
-        logGlobalPlacement("Approach 3: Resolving overlaps by x-coordinate (left to right)");
-        if (resolveOverlapsInSortedOrder(modules)) {
-            fixed = true;
-            logGlobalPlacement("Approach 3 successfully resolved all overlaps");
-            break;
-        }
-        
-        // If all approaches failed, try more drastic measures
-        if (!fixed) {
-            logGlobalPlacement("All standard approaches failed, trying grid-based placement");
-            if (gridBasedPlacement()) {
-                fixed = true;
-                logGlobalPlacement("Grid-based placement successfully resolved all overlaps");
-                break;
-            }
-        }
-    }
-    
-    bool success = !hasOverlaps();
-    if (success) {
-        logGlobalPlacement("Successfully fixed all overlaps in " + std::to_string(iterations) + " iterations");
-    } else {
-        logGlobalPlacement("Failed to fix all overlaps after " + std::to_string(iterations) + " iterations");
-    }
-    
-    return success;
+    return result;
 }
 
-// Helper method to resolve overlaps in the current order of modules
-bool PlacementSolver::resolveOverlapsInSortedOrder(const std::vector<ModuleInfo>& sortedModules) {
-    // Create a temporary contour to track used space
-    int maxWidth = 0;
-    for (const auto& module : sortedModules) {
-        maxWidth = std::max(maxWidth, module.x + module.width);
+// Find a random node in the B*-tree
+PlacementSolver::BStarNode* PlacementSolver::findRandomNode() {
+    if (preorderTraversal.empty()) {
+        return nullptr;
     }
     
-    // Add buffer to avoid edge cases
-    maxWidth = maxWidth * 2;
-    
-    SegmentTree<int> placementContour;
-    placementContour.init(maxWidth);
-    
-    // Place each module in order, avoiding overlaps
-    for (const auto& module : sortedModules) {
-        // Try to place at original position first
-        int x = module.x;
-        int y = module.y;
-        
-        // Check if original position overlaps with placed modules
-        int contourHeight = placementContour.query(x, x + module.width - 1);
-        if (contourHeight > y) {
-            // Overlap detected, find new position
-            y = contourHeight;
-        }
-        
-        // Update module position
-        if (module.isIsland) {
-            // It's a symmetry island
-            size_t islandIndex = std::stoi(module.name.substr(7));
-            if (islandIndex < symmetryIslands.size() && symmetryIslands[islandIndex]) {
-                logGlobalPlacement("Moving island_" + std::to_string(islandIndex) + 
-                                  " from (" + std::to_string(module.x) + "," + 
-                                  std::to_string(module.y) + ") to (" + 
-                                  std::to_string(x) + "," + std::to_string(y) + ")");
-                symmetryIslands[islandIndex]->setPosition(x, y);
-            }
-        } else {
-            // It's a regular module
-            if (regularModules.find(module.name) != regularModules.end() && 
-                regularModules[module.name]) {
-                logGlobalPlacement("Moving module " + module.name + 
-                                  " from (" + std::to_string(module.x) + "," + 
-                                  std::to_string(module.y) + ") to (" + 
-                                  std::to_string(x) + "," + std::to_string(y) + ")");
-                regularModules[module.name]->setPosition(x, y);
-            }
-        }
-        
-        // Update contour with the new placement
-        placementContour.update(x, x + module.width - 1, y + module.height);
-    }
-    
-    // Check if this fixed the overlaps
-    return !hasOverlaps();
+    return preorderTraversal[std::rand() % preorderTraversal.size()];
 }
-
-// Grid-based placement approach as a last resort
-bool PlacementSolver::gridBasedPlacement() {
-    logGlobalPlacement("Attempting grid-based placement");
-    
-    // Collect all module dimensions
-    std::vector<std::pair<std::string, std::pair<int, int>>> moduleInfo; // (name, (width, height))
-    
-    // Add regular modules
-    for (const auto& pair : regularModules) {
-        if (!pair.second) continue;
-        moduleInfo.push_back({
-            pair.first,
-            {pair.second->getWidth(), pair.second->getHeight()}
-        });
-    }
-    
-    // Add symmetry islands
-    for (size_t i = 0; i < symmetryIslands.size(); i++) {
-        if (!symmetryIslands[i]) continue;
-        moduleInfo.push_back({
-            "island_" + std::to_string(i),
-            {symmetryIslands[i]->getWidth(), symmetryIslands[i]->getHeight()}
-        });
-    }
-    
-    // Sort modules by area (largest first)
-    std::sort(moduleInfo.begin(), moduleInfo.end(), [](const auto& a, const auto& b) {
-        int areaA = a.second.first * a.second.second;
-        int areaB = b.second.first * b.second.second;
-        return areaA > areaB;
-    });
-    
-    // Initialize grid
-    int gridWidth = 0;
-    int totalArea = 0;
-    
-    // Calculate total area to get a sense of required grid size
-    for (const auto& module : moduleInfo) {
-        totalArea += module.second.first * module.second.second;
-        gridWidth = std::max(gridWidth, module.second.first);
-    }
-    
-    // Estimate grid height assuming square aspect ratio
-    int estimatedSide = static_cast<int>(std::sqrt(totalArea * 1.5)); // Add 50% buffer
-    gridWidth = std::max(gridWidth, estimatedSide);
-    
-    // Create a grid to track used space (1 = occupied, 0 = free)
-    std::vector<std::vector<bool>> grid(gridWidth * 2, std::vector<bool>(gridWidth * 2, false));
-    
-    // Place each module in the grid
-    for (const auto& module : moduleInfo) {
-        const std::string& name = module.first;
-        int width = module.second.first;
-        int height = module.second.second;
-        
-        bool placed = false;
-        
-        // Try to find a free spot in the grid
-        for (int y = 0; y < grid[0].size() - height && !placed; y++) {
-            for (int x = 0; x < grid.size() - width && !placed; x++) {
-                // Check if this spot is free
-                bool spotIsFree = true;
-                for (int dy = 0; dy < height && spotIsFree; dy++) {
-                    for (int dx = 0; dx < width && spotIsFree; dx++) {
-                        if (grid[x + dx][y + dy]) {
-                            spotIsFree = false;
-                        }
-                    }
-                }
-                
-                // If spot is free, place the module here
-                if (spotIsFree) {
-                    // Mark grid cells as occupied
-                    for (int dy = 0; dy < height; dy++) {
-                        for (int dx = 0; dx < width; dx++) {
-                            grid[x + dx][y + dy] = true;
-                        }
-                    }
-                    
-                    // Update module position
-                    if (name.substr(0, 7) == "island_") {
-                        // It's a symmetry island
-                        size_t islandIndex = std::stoi(name.substr(7));
-                        if (islandIndex < symmetryIslands.size() && symmetryIslands[islandIndex]) {
-                            logGlobalPlacement("Grid placing island_" + std::to_string(islandIndex) + 
-                                             " at (" + std::to_string(x) + "," + std::to_string(y) + ")");
-                            symmetryIslands[islandIndex]->setPosition(x, y);
-                        }
-                    } else {
-                        // It's a regular module
-                        if (regularModules.find(name) != regularModules.end() && 
-                            regularModules[name]) {
-                            logGlobalPlacement("Grid placing module " + name + 
-                                             " at (" + std::to_string(x) + "," + std::to_string(y) + ")");
-                            regularModules[name]->setPosition(x, y);
-                        }
-                    }
-                    
-                    placed = true;
-                }
-            }
-        }
-        
-        if (!placed) {
-            logGlobalPlacement("ERROR: Could not place module " + name + " in grid");
-            return false;
-        }
-    }
-    
-    // Check if this fixed the overlaps
-    return !hasOverlaps();
-}
-
 
 // Copy current solution to best solution
 void PlacementSolver::updateBestSolution() {
@@ -1622,6 +1552,47 @@ bool PlacementSolver::loadProblem(
     return true;
 }
 
+// Set simulated annealing parameters
+void PlacementSolver::setAnnealingParameters(
+    double initialTemp, double finalTemp, double cooling,
+    int iterations, int noImprovementLimit) {
+    
+    initialTemperature = initialTemp;
+    finalTemperature = finalTemp;
+    coolingRate = cooling;
+    iterationsPerTemperature = iterations;
+    this->noImprovementLimit = noImprovementLimit;
+}
+
+// Set perturbation probabilities
+void PlacementSolver::setPerturbationProbabilities(
+    double rotate, double move, double swap,
+    double changeRep, double convertSym) {
+    
+    rotateProb = rotate;
+    moveProb = move;
+    swapProb = swap;
+    changeRepProb = changeRep;
+    convertSymProb = convertSym;
+}
+
+// Set cost weights
+void PlacementSolver::setCostWeights(double areaWeight, double wirelengthWeight) {
+    this->areaWeight = areaWeight;
+    this->wirelengthWeight = wirelengthWeight;
+}
+
+// Set random seed
+void PlacementSolver::setRandomSeed(unsigned int seed) {
+    rng.seed(seed);
+    std::srand(seed);
+}
+
+// Set time limit
+void PlacementSolver::setTimeLimit(int seconds) {
+    timeLimit = seconds;
+}
+
 // Solve the placement problem
 bool PlacementSolver::solve() {
     // Record start time
@@ -1638,7 +1609,7 @@ bool PlacementSolver::solve() {
     
     // Calculate initial solution metrics
     solutionArea = calculateArea();
-    solutionWirelength = 0;
+    solutionWirelength = calculateWirelength();
     
     // Initialize best solution
     bestSolutionArea = solutionArea;
@@ -1718,7 +1689,7 @@ bool PlacementSolver::solve() {
                 
                 // Calculate new metrics
                 int newArea = calculateArea();
-                double newWirelength = 0;
+                double newWirelength = calculateWirelength();
                 double newCost = areaWeight * newArea + wirelengthWeight * newWirelength;
                 
                 // Check if we should accept this solution
@@ -1809,148 +1780,12 @@ bool PlacementSolver::solve() {
     return true;
 }
 
-void PlacementSolver::compactGlobalPlacement() {
-    logGlobalPlacement("Performing global compaction to remove unnecessary gaps");
-    
-    std::vector<ModuleInfo> modules;
-    
-    // Add regular modules
-    for (const auto& pair : regularModules) {
-        if (!pair.second) continue;
-        
-        ModuleInfo info{
-            pair.first,
-            false,
-            pair.second->getX(),
-            pair.second->getY(),
-            pair.second->getWidth(),
-            pair.second->getHeight()
-        };
-        modules.push_back(info);
-    }
-    
-    // Add symmetry islands
-    for (size_t i = 0; i < symmetryIslands.size(); i++) {
-        if (!symmetryIslands[i]) continue;
-        
-        ModuleInfo info{
-            "island_" + std::to_string(i),
-            true,
-            symmetryIslands[i]->getX(),
-            symmetryIslands[i]->getY(),
-            symmetryIslands[i]->getWidth(),
-            symmetryIslands[i]->getHeight()
-        };
-        modules.push_back(info);
-    }
-    
-    // Sort modules by y-coordinate for vertical compaction
-    std::sort(modules.begin(), modules.end(), [](const ModuleInfo& a, const ModuleInfo& b) {
-        return a.y < b.y;
-    });
-    
-    // Compact modules vertically
-    int currentY = 0;
-    for (size_t i = 0; i < modules.size(); i++) {
-        ModuleInfo& module = modules[i];
-        
-        // Check if any module is below (y < module.y) but has top > currentY
-        // that would block our compaction
-        bool blocked = false;
-        for (size_t j = 0; j < i; j++) {
-            const ModuleInfo& prevModule = modules[j];
-            
-            // Check if modules overlap horizontally
-            bool xOverlap = module.x < prevModule.right() && prevModule.x < module.right();
-            
-            // Check if prevModule extends above currentY
-            bool yExtends = prevModule.top() > currentY;
-            
-            if (xOverlap && yExtends) {
-                // This module blocks our compaction, adjust currentY
-                currentY = prevModule.top();
-                blocked = true;
-            }
-        }
-        
-        // If module can be moved down, update its position
-        if (module.y > currentY) {
-            int yDiff = module.y - currentY;
-            logGlobalPlacement("Compacting " + module.name + " down by " + 
-                              std::to_string(yDiff) + " pixels");
-            
-            module.y = currentY;
-            
-            // Update the actual module/island position
-            if (module.isIsland) {
-                size_t islandIndex = std::stoi(module.name.substr(7));
-                if (islandIndex < symmetryIslands.size() && symmetryIslands[islandIndex]) {
-                    symmetryIslands[islandIndex]->setPosition(module.x, module.y);
-                }
-            } else {
-                if (regularModules.find(module.name) != regularModules.end() && 
-                    regularModules[module.name]) {
-                    regularModules[module.name]->setPosition(module.x, module.y);
-                }
-            }
-        }
-        
-        // Update currentY for next module
-        currentY = module.y + module.height;
-    }
-    
-    // Sort modules by x-coordinate for horizontal compaction
-    std::sort(modules.begin(), modules.end(), [](const ModuleInfo& a, const ModuleInfo& b) {
-        return a.x < b.x;
-    });
-    
-    // Compact modules horizontally (similar logic as vertical compaction)
-    int currentX = 0;
-    for (size_t i = 0; i < modules.size(); i++) {
-        ModuleInfo& module = modules[i];
-        
-        // Check if any module is to the left (x < module.x) but has right > currentX
-        // that would block our compaction
-        bool blocked = false;
-        for (size_t j = 0; j < i; j++) {
-            const ModuleInfo& prevModule = modules[j];
-            
-            // Check if modules overlap vertically
-            bool yOverlap = module.y < prevModule.top() && prevModule.y < module.top();
-            
-            // Check if prevModule extends beyond currentX
-            bool xExtends = prevModule.right() > currentX;
-            
-            if (yOverlap && xExtends) {
-                // This module blocks our compaction, adjust currentX
-                currentX = prevModule.right();
-                blocked = true;
-            }
-        }
-        
-        // If module can be moved left, update its position
-        if (module.x > currentX) {
-            int xDiff = module.x - currentX;
-            logGlobalPlacement("Compacting " + module.name + " left by " + 
-                              std::to_string(xDiff) + " pixels");
-            
-            module.x = currentX;
-            
-            // Update the actual module/island position
-            if (module.isIsland) {
-                size_t islandIndex = std::stoi(module.name.substr(7));
-                if (islandIndex < symmetryIslands.size() && symmetryIslands[islandIndex]) {
-                    symmetryIslands[islandIndex]->setPosition(module.x, module.y);
-                }
-            } else {
-                if (regularModules.find(module.name) != regularModules.end() && 
-                    regularModules[module.name]) {
-                    regularModules[module.name]->setPosition(module.x, module.y);
-                }
-            }
-        }
-        
-        // Update currentX for next module
-        currentX = module.x + module.width;
-    }
+// Get solution area
+int PlacementSolver::getSolutionArea() const {
+    return solutionArea;
+}
+
+// Get solution modules
+const std::map<std::string, std::shared_ptr<Module>>& PlacementSolver::getSolutionModules() const {
+    return bestSolutionModules;
 }

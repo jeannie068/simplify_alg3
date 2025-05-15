@@ -117,16 +117,16 @@ int main(int argc, char* argv[]) {
     solver.setAnnealingParameters(
         1000.0,     // Initial temperature
         0.1,        // Final temperature
-        0.99,       // Cooling rate (slower cooling for better exploration)
+        0.98,       // Cooling rate (slower cooling for better exploration)
         300,        // Iterations per temperature (increased for better exploration)
         3000        // No improvement limit (increased to allow more exploration)
     );
     
     // Configure perturbation probabilities (favor rotation which is more effective)
     solver.setPerturbationProbabilities(
-        0.2,        // Rotate probability (increased from 0.3)
-        0.4,        // Move probability (decreased from 0.3)
-        0.3,        // Swap probability (decreased from 0.3)
+        0.5,        // Rotate probability (increased from 0.3)
+        0.2,        // Move probability (decreased from 0.3)
+        0.2,        // Swap probability (decreased from 0.3)
         0.05,       // Change representative probability
         0.05        // Convert symmetry type probability
     );
@@ -141,7 +141,7 @@ int main(int argc, char* argv[]) {
     solver.setRandomSeed(static_cast<unsigned int>(time(nullptr)));
     
     // Set time limit to 290 seconds (4:50) to ensure completion within 5 minutes
-    solver.setTimeLimit(240);
+    solver.setTimeLimit(290);
     
     // Solve the placement problem
     Logger::init("placement_debug.log");

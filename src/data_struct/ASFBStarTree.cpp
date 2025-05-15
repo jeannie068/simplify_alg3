@@ -135,68 +135,90 @@ void ASFBStarTree::packBStarTree() {
  * @param height Height of the module
  */
 void ASFBStarTree::updateContour(int x, int y, int width, int height) {
-    // Additional validations
-    if (width <= 0 || height <= 0) {
-        Logger::log("ERROR: Invalid module dimensions in ASFBStarTree::updateContour: width=" + 
-                   std::to_string(width) + ", height=" + std::to_string(height));
+    int right = x + width;
+    int top = y + height;
+    
+    // Create a new contour point if contour is empty
+    if (contourHead == nullptr) {
+        contourHead = new ContourPoint(x, top);
+        contourHead->next = new ContourPoint(right, 0);
         return;
     }
     
-    // Check if trying to place negative coordinates
-    if (x < 0 || y < 0) {
-        Logger::log("ERROR: Cannot place module at negative coordinates in ASFBStarTree: (" + 
-                   std::to_string(x) + "," + std::to_string(y) + ")");
-        // Adjust to non-negative coordinates
-        if (x < 0) x = 0;
-        if (y < 0) y = 0;
+    // Find the position to insert or update
+    ContourPoint* curr = contourHead;
+    ContourPoint* prev = nullptr;
+    
+    // Skip points to the left of the module
+    while (curr != nullptr && curr->x < x) {
+        prev = curr;
+        curr = curr->next;
     }
     
-    // Bounds checking - limit to valid range
-    int adjX = x;
-    int adjWidth = width;
+    // Handle case where we need to insert a point at x
+    if (curr == nullptr || curr->x > x) {
+        // Create a new point at the left edge of the module
+        ContourPoint* newPoint = new ContourPoint(x, top);
+        
+        // Link the new point
+        if (prev) {
+            prev->next = newPoint;
+        } else {
+            contourHead = newPoint;
+        }
+        newPoint->next = curr;
+        
+        // Update for next operations
+        prev = newPoint;
+    } else if (curr->x == x) {
+        // Update existing point at x
+        curr->height = std::max(curr->height, top);
+        prev = curr;
+        curr = curr->next;
+    }
     
-    if (adjX + adjWidth > maxContourWidth) {
-        Logger::log("WARNING: Module extends beyond ASFBStarTree maximum contour width");
-        // If it's far beyond the bound, we need to increase maxContourWidth
-        if (adjX + adjWidth > maxContourWidth * 1.5) {
-            int newMaxWidth = (adjX + adjWidth) * 2; // Double to avoid frequent resizes
-            Logger::log("Increasing ASFBStarTree contour max width from " + 
-                       std::to_string(maxContourWidth) + " to " + 
-                       std::to_string(newMaxWidth));
+    // Process or remove intermediate points up to right edge
+    while (curr != nullptr && curr->x < right) {
+        if (curr->height <= top) {
+            // This point is below or at our new contour height, so remove it
+            ContourPoint* temp = curr;
+            curr = curr->next;
+            delete temp;
             
-            // Save current contour heights
-            std::vector<int> heights;
-            for (int i = 0; i < maxContourWidth; i++) {
-                heights.push_back(contourSegTree.query(i, i));
-            }
-            
-            // Reinitialize contour with new size
-            maxContourWidth = newMaxWidth;
-            contourSegTree.init(maxContourWidth);
-            
-            // Restore previous heights
-            for (int i = 0; i < heights.size(); i++) {
-                if (heights[i] > 0) {
-                    contourSegTree.update(i, i, heights[i]);
-                }
+            if (prev) {
+                prev->next = curr;
+            } else {
+                contourHead = curr;
             }
         } else {
-            // Otherwise just truncate
-            adjWidth = maxContourWidth - adjX;
+            // This point is above our new contour, keep it
+            prev = curr;
+            curr = curr->next;
         }
     }
     
-    int top = y + height;
-    
-    // Get current height at this range
-    int currentHeight = contourSegTree.query(adjX, adjX + adjWidth - 1);
-    
-    // Only update if new height is higher
-    if (top > currentHeight) {
-        contourSegTree.update(adjX, adjX + adjWidth - 1, top);
+    // Handle the right edge point
+    if (curr == nullptr || curr->x > right) {
+        // Add a new point at the right edge
+        ContourPoint* newPoint = new ContourPoint(right, prev ? prev->height : 0);
+        newPoint->next = curr;
+        
+        if (prev) {
+            prev->next = newPoint;
+        } else {
+            contourHead = newPoint;
+        }
+    } else if (curr->x == right) {
+        // Update existing point at the right edge
+        curr->height = std::max(curr->height, prev ? prev->height : 0);
     }
 }
 
+
+/**
+ * Calculates the symmetry axis position based on the current placement
+ * Optimized to minimize overall area while maintaining symmetry constraints
+ */
 void ASFBStarTree::calculateSymmetryAxisPosition() {
     Logger::log("Calculating optimal symmetry axis position");
     
@@ -797,21 +819,13 @@ bool ASFBStarTree::validateConnectivity() {
  * Helper function to check if placing a module would overlap with existing contour
  */
 bool ASFBStarTree::hasContourOverlap(int x, int y, int width, int height) {
-    // Bounds checking
-    if (x < 0 || x + width > maxContourWidth) {
-        Logger::log("WARNING: ASF-B*-tree contour overlap check out of bounds: x=" + std::to_string(x) + 
-                   ", width=" + std::to_string(width) + 
-                   ", maxWidth=" + std::to_string(maxContourWidth));
-        // Adjust to stay within bounds if possible
-        if (x < 0) x = 0;
-        if (x + width > maxContourWidth) width = maxContourWidth - x;
+    int right = x + width;
+    for (int currX = x; currX < right; currX++) {
+        if (getContourHeight(currX) > y) {
+            return true;
+        }
     }
-    
-    // Get maximum height in the range
-    int maxHeight = contourSegTree.query(x, x + width - 1);
-    
-    // If contour height is greater than y, there's an overlap
-    return maxHeight > y;
+    return false;
 }
 
 /**
@@ -950,260 +964,218 @@ void ASFBStarTree::optimizeModulePositions() {
  * This function tries to compact the placement in X and Y directions
  */
 void ASFBStarTree::compactPlacement() {
-    Logger::log("Beginning compaction of symmetry island...");
+    Logger::log("Applying compaction to minimize area");
     
-    // Log initial positions before compaction
-    for (const auto& pair : modules) {
-        Logger::log("Before compaction: " + pair.first + " at (" + 
-                   std::to_string(pair.second->getX()) + "," + 
-                   std::to_string(pair.second->getY()) + ")");
+    // Create a copy of the current positions for working
+    std::unordered_map<std::string, std::pair<int, int>> positions;
+    std::unordered_map<std::string, std::pair<int, int>> dimensions;
+    
+    for (const auto& pair : representativeModules) {
+        const auto& module = modules[pair.first];
+        positions[pair.first] = {module->getX(), module->getY()};
+        dimensions[pair.first] = {module->getWidth(), module->getHeight()};
     }
     
-    // Calculate adjusted bounding box
+    // Find minimum X and Y to ensure all modules have positive coordinates
     int minX = std::numeric_limits<int>::max();
     int minY = std::numeric_limits<int>::max();
-    int maxX = std::numeric_limits<int>::min();
-    int maxY = std::numeric_limits<int>::min();
     
-    for (const auto& pair : modules) {
-        const auto& module = pair.second;
-        minX = std::min(minX, module->getX());
-        minY = std::min(minY, module->getY());
-        maxX = std::max(maxX, module->getX() + module->getWidth());
-        maxY = std::max(maxY, module->getY() + module->getHeight());
+    for (const auto& pair : positions) {
+        minX = std::min(minX, pair.second.first);
+        minY = std::min(minY, pair.second.second);
     }
     
-    Logger::log("Initial bounding box: (" + std::to_string(minX) + "," + 
-               std::to_string(minY) + ") to (" + std::to_string(maxX) + "," + 
-               std::to_string(maxY) + ")");
+    // Shift all modules to ensure positive coordinates
+    if (minX > 0 || minY > 0) {
+        for (auto& pair : positions) {
+            pair.second.first -= minX;
+            pair.second.second -= minY;
+        }
+    }
     
-    // Shift modules to ensure positive coordinates
-    if (minX < 0 || minY < 0) {
-        int shiftX = minX < 0 ? -minX : 0;
-        int shiftY = minY < 0 ? -minY : 0;
-        
-        Logger::log("Shifting all modules by (" + std::to_string(shiftX) + "," + 
-                   std::to_string(shiftY) + ") to ensure positive coordinates");
-        
-        for (auto& pair : modules) {
-            auto& module = pair.second;
-            module->setPosition(module->getX() + shiftX, module->getY() + shiftY);
+    // For vertical symmetry, focus on minimizing width
+    if (symmetryGroup->getType() == SymmetryType::VERTICAL) {
+        // Sort modules by x-coordinate
+        std::vector<std::string> modulesByX;
+        for (const auto& pair : positions) {
+            modulesByX.push_back(pair.first);
         }
         
-        // Recalculate bounding box
-        minX += shiftX;
-        maxX += shiftX;
-        minY += shiftY;
-        maxY += shiftY;
-    }
-    
-    // Separate modules by symmetry axis
-    std::vector<std::string> leftModules, rightModules, axisCenteredModules;
-    double axisPos = symmetryAxisPosition;
-    
-    if (symmetryGroup->getType() == SymmetryType::VERTICAL) {
-        // For vertical symmetry
-        for (const auto& pair : modules) {
-            const std::string& name = pair.first;
-            const auto& module = pair.second;
-            double center = module->getX() + module->getWidth() / 2.0;
+        std::sort(modulesByX.begin(), modulesByX.end(), [&positions](const std::string& a, const std::string& b) {
+            return positions[a].first < positions[b].first;
+        });
+        
+        // Compact in X direction by shifting modules to the left when possible
+        for (size_t i = 1; i < modulesByX.size(); i++) {
+            const std::string& currModule = modulesByX[i];
+            int currX = positions[currModule].first;
+            int currY = positions[currModule].second;
+            int currWidth = dimensions[currModule].first;
+            int currHeight = dimensions[currModule].second;
             
-            if (std::abs(center - axisPos) < 1.0) {
-                // Module is centered on axis
-                axisCenteredModules.push_back(name);
-            } else if (center < axisPos) {
-                // Module is left of axis
-                leftModules.push_back(name);
-            } else {
-                // Module is right of axis
-                rightModules.push_back(name);
+            // Try to shift this module left as much as possible without overlapping
+            int maxLeftShift = currX;
+            
+            for (size_t j = 0; j < i; j++) {
+                const std::string& prevModule = modulesByX[j];
+                int prevX = positions[prevModule].first;
+                int prevY = positions[prevModule].second;
+                int prevWidth = dimensions[prevModule].first;
+                int prevHeight = dimensions[prevModule].second;
+                
+                // Check if there's a potential overlap in Y direction
+                bool yOverlap = !(prevY + prevHeight <= currY || currY + currHeight <= prevY);
+                
+                if (yOverlap) {
+                    // If they could overlap in Y, calculate the minimum X distance needed
+                    maxLeftShift = std::min(maxLeftShift, currX - (prevX + prevWidth));
+                }
+            }
+            
+            // Apply the shift
+            if (maxLeftShift > 0) {
+                positions[currModule].first -= maxLeftShift;
+            }
+        }
+        
+        // Sort modules by y-coordinate to compact in Y direction
+        std::vector<std::string> modulesByY;
+        for (const auto& pair : positions) {
+            modulesByY.push_back(pair.first);
+        }
+        
+        std::sort(modulesByY.begin(), modulesByY.end(), [&positions](const std::string& a, const std::string& b) {
+            return positions[a].second < positions[b].second;
+        });
+        
+        // Compact in Y direction by shifting modules down when possible
+        for (size_t i = 1; i < modulesByY.size(); i++) {
+            const std::string& currModule = modulesByY[i];
+            int currX = positions[currModule].first;
+            int currY = positions[currModule].second;
+            int currWidth = dimensions[currModule].first;
+            int currHeight = dimensions[currModule].second;
+            
+            // Try to shift this module down as much as possible without overlapping
+            int maxDownShift = currY;
+            
+            for (size_t j = 0; j < i; j++) {
+                const std::string& prevModule = modulesByY[j];
+                int prevX = positions[prevModule].first;
+                int prevY = positions[prevModule].second;
+                int prevWidth = dimensions[prevModule].first;
+                int prevHeight = dimensions[prevModule].second;
+                
+                // Check if there's a potential overlap in X direction
+                bool xOverlap = !(prevX + prevWidth <= currX || currX + currWidth <= prevX);
+                
+                if (xOverlap) {
+                    // If they could overlap in X, calculate the minimum Y distance needed
+                    maxDownShift = std::min(maxDownShift, currY - (prevY + prevHeight));
+                }
+            }
+            
+            // Apply the shift
+            if (maxDownShift > 0) {
+                positions[currModule].second -= maxDownShift;
             }
         }
     } else {
-        // For horizontal symmetry
-        for (const auto& pair : modules) {
-            const std::string& name = pair.first;
-            const auto& module = pair.second;
-            double center = module->getY() + module->getHeight() / 2.0;
-            
-            if (std::abs(center - axisPos) < 1.0) {
-                // Module is centered on axis
-                axisCenteredModules.push_back(name);
-            } else if (center < axisPos) {
-                // Module is below axis
-                leftModules.push_back(name);
-            } else {
-                // Module is above axis
-                rightModules.push_back(name);
-            }
-        }
-    }
-    
-    Logger::log("Modules analysis: " + std::to_string(leftModules.size()) + " left/below axis, " + 
-               std::to_string(rightModules.size()) + " right/above axis, " + 
-               std::to_string(axisCenteredModules.size()) + " on axis");
-    
-    // For each group, perform compaction while respecting symmetry
-    // This is a simplified example - in practice, you'd use a more sophisticated algorithm
-    
-    // First, sort modules by position
-    auto sortModules = [this](std::vector<std::string>& moduleList, bool byX) {
-        std::sort(moduleList.begin(), moduleList.end(), [this, byX](const std::string& a, const std::string& b) {
-            if (byX) {
-                return modules[a]->getX() < modules[b]->getX();
-            } else {
-                return modules[a]->getY() < modules[b]->getY();
-            }
-        });
-    };
-    
-    if (symmetryGroup->getType() == SymmetryType::VERTICAL) {
-        // For vertical symmetry, compact in X direction first
-        sortModules(leftModules, true);
-        sortModules(rightModules, true);
-        
-        // Compact left modules towards the axis
-        int currentX = minX;
-        for (const auto& name : leftModules) {
-            auto& module = modules[name];
-            if (module->getX() > currentX) {
-                Logger::log("Compacting left module " + name + " from x=" + 
-                           std::to_string(module->getX()) + " to x=" + 
-                           std::to_string(currentX));
-                module->setPosition(currentX, module->getY());
-            }
-            currentX = module->getX() + module->getWidth();
+        // For horizontal symmetry, focus on minimizing height
+        // Sort modules by y-coordinate
+        std::vector<std::string> modulesByY;
+        for (const auto& pair : positions) {
+            modulesByY.push_back(pair.first);
         }
         
-        // Compact right modules away from the axis
-        double axisPos = symmetryAxisPosition;
-        std::sort(rightModules.begin(), rightModules.end(), [this](const std::string& a, const std::string& b) {
-            return modules[a]->getX() > modules[b]->getX(); // Reverse sort for right side
+        std::sort(modulesByY.begin(), modulesByY.end(), [&positions](const std::string& a, const std::string& b) {
+            return positions[a].second < positions[b].second;
         });
         
-        currentX = maxX;
-        for (const auto& name : rightModules) {
-            auto& module = modules[name];
-            int moduleRight = module->getX() + module->getWidth();
-            if (moduleRight < currentX) {
-                int newX = currentX - module->getWidth();
-                Logger::log("Compacting right module " + name + " from x=" + 
-                           std::to_string(module->getX()) + " to x=" + 
-                           std::to_string(newX));
-                module->setPosition(newX, module->getY());
+        // Compact in Y direction by shifting modules down when possible
+        for (size_t i = 1; i < modulesByY.size(); i++) {
+            const std::string& currModule = modulesByY[i];
+            int currX = positions[currModule].first;
+            int currY = positions[currModule].second;
+            int currWidth = dimensions[currModule].first;
+            int currHeight = dimensions[currModule].second;
+            
+            // Try to shift this module down as much as possible without overlapping
+            int maxDownShift = currY;
+            
+            for (size_t j = 0; j < i; j++) {
+                const std::string& prevModule = modulesByY[j];
+                int prevX = positions[prevModule].first;
+                int prevY = positions[prevModule].second;
+                int prevWidth = dimensions[prevModule].first;
+                int prevHeight = dimensions[prevModule].second;
+                
+                // Check if there's a potential overlap in X direction
+                bool xOverlap = !(prevX + prevWidth <= currX || currX + currWidth <= prevX);
+                
+                if (xOverlap) {
+                    // If they could overlap in X, calculate the minimum Y distance needed
+                    maxDownShift = std::min(maxDownShift, currY - (prevY + prevHeight));
+                }
             }
-            currentX = module->getX();
+            
+            // Apply the shift
+            if (maxDownShift > 0) {
+                positions[currModule].second -= maxDownShift;
+            }
         }
         
-        // Now compact in Y direction (similar process but keeping X fixed)
-        // Sort by Y
-        sortModules(leftModules, false);
-        sortModules(rightModules, false);
-        sortModules(axisCenteredModules, false);
+        // Sort modules by x-coordinate to compact in X direction
+        std::vector<std::string> modulesByX;
+        for (const auto& pair : positions) {
+            modulesByX.push_back(pair.first);
+        }
         
-        // Compact all modules upward
-        int currentY = minY;
-        // Process left, axis-centered, and right modules in Y order
-        std::vector<std::string> allModules;
-        allModules.insert(allModules.end(), leftModules.begin(), leftModules.end());
-        allModules.insert(allModules.end(), axisCenteredModules.begin(), axisCenteredModules.end());
-        allModules.insert(allModules.end(), rightModules.begin(), rightModules.end());
-        
-        // Sort by Y again since we combined lists
-        std::sort(allModules.begin(), allModules.end(), [this](const std::string& a, const std::string& b) {
-            return modules[a]->getY() < modules[b]->getY();
+        std::sort(modulesByX.begin(), modulesByX.end(), [&positions](const std::string& a, const std::string& b) {
+            return positions[a].first < positions[b].first;
         });
         
-        // Compact upward
-        for (const auto& name : allModules) {
-            auto& module = modules[name];
-            if (module->getY() > currentY) {
-                Logger::log("Compacting module " + name + " from y=" + 
-                           std::to_string(module->getY()) + " to y=" + 
-                           std::to_string(currentY));
-                module->setPosition(module->getX(), currentY);
+        // Compact in X direction by shifting modules left when possible
+        for (size_t i = 1; i < modulesByX.size(); i++) {
+            const std::string& currModule = modulesByX[i];
+            int currX = positions[currModule].first;
+            int currY = positions[currModule].second;
+            int currWidth = dimensions[currModule].first;
+            int currHeight = dimensions[currModule].second;
+            
+            // Try to shift this module left as much as possible without overlapping
+            int maxLeftShift = currX;
+            
+            for (size_t j = 0; j < i; j++) {
+                const std::string& prevModule = modulesByX[j];
+                int prevX = positions[prevModule].first;
+                int prevY = positions[prevModule].second;
+                int prevWidth = dimensions[prevModule].first;
+                int prevHeight = dimensions[prevModule].second;
+                
+                // Check if there's a potential overlap in Y direction
+                bool yOverlap = !(prevY + prevHeight <= currY || currY + currHeight <= prevY);
+                
+                if (yOverlap) {
+                    // If they could overlap in Y, calculate the minimum X distance needed
+                    maxLeftShift = std::min(maxLeftShift, currX - (prevX + prevWidth));
+                }
             }
-            currentY = module->getY() + module->getHeight();
+            
+            // Apply the shift
+            if (maxLeftShift > 0) {
+                positions[currModule].first -= maxLeftShift;
+            }
         }
-    } else {
-        // For horizontal symmetry, similar process but swapping X and Y
-        // (Implement similar logic as above but for horizontal symmetry)
     }
     
-    // Update symmetry axis position if needed
-    if (symmetryGroup->getType() == SymmetryType::VERTICAL) {
-        // For self-symmetric modules, make sure they are centered on the axis
-        for (const auto& name : axisCenteredModules) {
-            auto& module = modules[name];
-            int moduleWidth = module->getWidth();
-            int newX = static_cast<int>(symmetryAxisPosition) - moduleWidth / 2;
-            
-            if (module->getX() != newX) {
-                Logger::log("Centering self-symmetric module " + name + " on axis at x=" + 
-                           std::to_string(newX));
-                module->setPosition(newX, module->getY());
-            }
-        }
+    // Update module positions
+    for (const auto& pair : positions) {
+        const std::string& moduleName = pair.first;
+        const auto& pos = pair.second;
         
-        // Verify symmetry relationships for symmetry pairs
-        for (const auto& pair : repToPairMap) {
-            const std::string& repName = pair.first;
-            const std::string& symName = pair.second;
-            
-            std::shared_ptr<Module> repModule = modules[repName];
-            std::shared_ptr<Module> symModule = modules[symName];
-            
-            // Calculate expected symmetric position
-            int repCenterX = repModule->getX() + repModule->getWidth() / 2;
-            int distanceFromAxis = static_cast<int>(symmetryAxisPosition) - repCenterX;
-            int symCenterX = static_cast<int>(symmetryAxisPosition) + distanceFromAxis;
-            int symX = symCenterX - symModule->getWidth() / 2;
-            
-            // Ensure y-coordinates match
-            if (repModule->getY() != symModule->getY()) {
-                Logger::log("Fixing y-coordinate mismatch for symmetry pair " + 
-                           repName + " and " + symName);
-                symModule->setPosition(symModule->getX(), repModule->getY());
-            }
-            
-            // Ensure x-coordinates are properly symmetric
-            if (symModule->getX() != symX) {
-                Logger::log("Fixing x-coordinate symmetry for pair " + 
-                           repName + " and " + symName);
-                symModule->setPosition(symX, symModule->getY());
-            }
-        }
-    } else {
-        // Similar logic for horizontal symmetry
+        modules[moduleName]->setPosition(pos.first, pos.second);
     }
     
-    // Log final positions after compaction
-    for (const auto& pair : modules) {
-        Logger::log("After compaction: " + pair.first + " at (" + 
-                   std::to_string(pair.second->getX()) + "," + 
-                   std::to_string(pair.second->getY()) + ")");
-    }
-    
-    // Recalculate final bounding box
-    minX = std::numeric_limits<int>::max();
-    minY = std::numeric_limits<int>::max();
-    maxX = std::numeric_limits<int>::min();
-    maxY = std::numeric_limits<int>::min();
-    
-    for (const auto& pair : modules) {
-        const auto& module = pair.second;
-        minX = std::min(minX, module->getX());
-        minY = std::min(minY, module->getY());
-        maxX = std::max(maxX, module->getX() + module->getWidth());
-        maxY = std::max(maxY, module->getY() + module->getHeight());
-    }
-    
-    Logger::log("Final bounding box after compaction: (" + std::to_string(minX) + "," + 
-               std::to_string(minY) + ") to (" + std::to_string(maxX) + "," + 
-               std::to_string(maxY) + ")");
-    
-    // Ensure all modules have positive coordinates
-    if (minX < 0 || minY < 0) {
-        Logger::log("WARNING: Found negative coordinates after compaction!");
-    }
+    Logger::log("Compaction complete for tight symmetry island packing");
 }

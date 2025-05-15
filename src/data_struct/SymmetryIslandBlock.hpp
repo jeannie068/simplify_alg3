@@ -24,9 +24,6 @@ private:
     
     // Cached original positions of modules before global placement
     std::map<std::string, std::pair<int, int>> originalPositions;
-
-    // Store the global placement boundaries for validation
-    std::tuple<int, int, int, int> globalBoundary; // (left, bottom, right, top)
     
 public:
     /**
@@ -89,63 +86,26 @@ public:
      * Updates the positions of all internal modules based on global position
      */
     void updateModulePositions() {
-        // Store the global bounds
-        int left = x;
-        int bottom = y;
-        int right = x + width;
-        int top = y + height;
-        
-        globalBoundary = std::make_tuple(left, bottom, right, top);
-        
-        int minLocalX = std::numeric_limits<int>::max();
-        int minLocalY = std::numeric_limits<int>::max();
-        
-        // First find minimum local coordinates to ensure proper mapping
-        for (const auto& pair : originalPositions) {
-            minLocalX = std::min(minLocalX, pair.second.first);
-            minLocalY = std::min(minLocalY, pair.second.second);
-        }
-        
         for (const auto& pair : asfTree->getModules()) {
             const auto& moduleName = pair.first;
             auto& module = pair.second;
             
-            // Get relative position (adjusted for any negative local coordinates)
+            // Get relative position
             const auto& relPos = originalPositions[moduleName];
-            int relX = relPos.first - minLocalX; // Normalize to zero-based
-            int relY = relPos.second - minLocalY;
             
-            // Set absolute position - this is crucial for correct placement
-            module->setPosition(x + relX, y + relY);
-            
-            // Validate that module position is within global boundary
-            int moduleRight = module->getX() + module->getWidth();
-            int moduleTop = module->getY() + module->getHeight();
-            
-            if (module->getX() < left || module->getY() < bottom || 
-                moduleRight > right || moduleTop > top) {
-                // Log warning about module extending beyond island boundary
-                Logger::log("WARNING: Module " + moduleName + " extends beyond symmetry island boundary");
-                // Adjust position to stay within boundary if needed
-                if (module->getX() < left) module->setPosition(left, module->getY());
-                if (module->getY() < bottom) module->setPosition(module->getX(), bottom);
-                if (moduleRight > right) module->setPosition(right - module->getWidth(), module->getY());
-                if (moduleTop > top) module->setPosition(module->getX(), top - module->getHeight());
-            }
+            // Set absolute position
+            module->setPosition(x + relPos.first, y + relPos.second);
         }
         
         // Update symmetry axis position
         auto symmetryGroup = asfTree->getSymmetryGroup();
         if (symmetryGroup->getType() == SymmetryType::VERTICAL) {
-            double relativeAxis = asfTree->getSymmetryAxisPosition() - minLocalX;
+            double relativeAxis = asfTree->getSymmetryAxisPosition() - originalPositions.begin()->second.first;
             symmetryGroup->setAxisPosition(x + relativeAxis);
         } else {
-            double relativeAxis = asfTree->getSymmetryAxisPosition() - minLocalY;
+            double relativeAxis = asfTree->getSymmetryAxisPosition() - originalPositions.begin()->second.second;
             symmetryGroup->setAxisPosition(y + relativeAxis);
         }
-        
-        Logger::log("Updated module positions for symmetry island: " + name + 
-                   " at global position (" + std::to_string(x) + "," + std::to_string(y) + ")");
     }
     
     // Getters
@@ -161,10 +121,6 @@ public:
         this->x = x;
         this->y = y;
         updateModulePositions();
-    }
-
-    std::tuple<int, int, int, int> getGlobalBoundary() const {
-        return globalBoundary;
     }
     
     /**
