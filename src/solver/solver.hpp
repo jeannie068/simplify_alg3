@@ -14,6 +14,8 @@
 #include "../data_struct/ASFBStarTree.hpp"
 #include "../data_struct/SymmetryIslandBlock.hpp"
 #include "../data_struct/BStarTree.hpp"
+#include "../slicing/slicing_struct.hpp" 
+#include "../slicing/slicing_sa.hpp" 
 
 /**
  * @brief Placement solver using simulated annealing
@@ -359,10 +361,12 @@ public:
      * @return True if solution was found
      */
     bool solve();
-    
+
+    bool repairOverlaps();
+
     /**
      * Gets the solution area
-     * 
+     *
      * @return Area of the solution
      */
     int getSolutionArea() const;

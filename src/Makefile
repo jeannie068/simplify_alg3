@@ -5,7 +5,8 @@ EXEC     := ../bin/hw4
 SRC_DIRS := .\
             parser\
             data_struct\
-            solver
+            solver\
+            slicing
 SRCS     := $(wildcard $(SRC_DIRS:=/*.cpp))
 OBJS     := $(SRCS:.cpp=.o)
 DEPS     := $(OBJS:.o=.d)

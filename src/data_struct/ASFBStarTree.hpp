@@ -12,6 +12,7 @@
 #include <random>
 #include <iostream>
 #include <queue>
+#include <functional> // Added for std::function
 
 #include "Module.hpp"
 #include "SymmetryConstraint.hpp"
@@ -86,7 +87,11 @@ public:
      * @param modules Map of all modules
      */
     ASFBStarTree(std::shared_ptr<SymmetryGroup> symmetryGroup, const std::map<std::string, std::shared_ptr<Module>>& modules)
-        : symmetryGroup(symmetryGroup), modules(modules), root(nullptr), contourHead(nullptr), symmetryAxisPosition(-1) {
+        : symmetryGroup(symmetryGroup), 
+          modules(modules), 
+          root(nullptr), 
+          symmetryAxisPosition(-1),
+          contourHead(nullptr) {
         
         // Initialize module relationships
         initializeRepresentatives();
@@ -194,38 +199,38 @@ public:
         
         // Set to keep track of visited nodes
         std::unordered_set<BStarNode*> visited;
+        std::unordered_set<BStarNode*> path;
         
         // Function to check for cycles in the tree
-        std::function<bool(BStarNode*, std::unordered_set<BStarNode*>&, std::string)> hasNoCycles =
-            [&](BStarNode* current, std::unordered_set<BStarNode*>& path, std::string pathStr) -> bool {
+        std::function<bool(BStarNode*, BStarNode*, std::unordered_set<BStarNode*>&)> hasNoCycles = 
+            [&](BStarNode* current, BStarNode* parent, std::unordered_set<BStarNode*>& nodePath) -> bool {
                 if (current == nullptr) return true;
                 
                 // Log the current path
-                std::string currentPathStr = pathStr + " -> " + current->moduleName;
+                std::string pathStr = "Path";
                 
                 // If we've seen this node in the current path, we have a cycle
-                if (path.find(current) != path.end()) {
-                    Logger::log("CYCLE DETECTED: " + currentPathStr);
+                if (nodePath.find(current) != nodePath.end()) {
+                    Logger::log("CYCLE DETECTED: " + pathStr);
                     return false;
                 }
                 
                 // Add this node to the current path
-                path.insert(current);
+                nodePath.insert(current);
                 visited.insert(current);
                 
                 // Check children
-                bool leftValid = hasNoCycles(current->left, path, currentPathStr);
-                bool rightValid = hasNoCycles(current->right, path, currentPathStr);
+                bool leftValid = hasNoCycles(current->left, current, nodePath);
+                bool rightValid = hasNoCycles(current->right, current, nodePath);
                 
                 // Remove this node from the current path (backtracking)
-                path.erase(current);
+                nodePath.erase(current);
                 
                 return leftValid && rightValid;
             };
         
         // Start DFS from the root to check for cycles
-        std::unordered_set<BStarNode*> path;
-        bool noCycles = hasNoCycles(node, path, "START");
+        bool noCycles = hasNoCycles(node, nullptr, path);
         
         if (!noCycles) {
             Logger::log("Tree has cycles!");

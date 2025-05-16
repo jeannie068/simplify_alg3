@@ -252,12 +252,6 @@ int PlacementSolver::getContourHeight(int x) {
 }
 
 /**
- * Enhanced buildInitialBStarTree with intelligent node arrangement
- * Replace the existing buildInitialBStarTree in PlacementSolver
- */
-// Fix for buildInitialBStarTree function to prevent creating cycles
-// Enhanced buildInitialBStarTree Implementation for Balanced Tree
-/**
  * Builds a more balanced B*-tree for global placement
  * The key improvement is to generate a tree that uses both left and right children
  * to create a more compact placement
@@ -273,6 +267,11 @@ void PlacementSolver::buildInitialBStarTree() {
     std::vector<std::string> entities;
     std::unordered_map<std::string, std::pair<int, int>> entityDimensions;
     std::unordered_map<std::string, bool> isIslandMap;
+    
+    // Keep track of whether we have a clk module
+    bool hasClkModule = false;
+    std::string clkModuleName;
+    BStarNode* clkNode = nullptr;
     
     // Add symmetry islands
     for (size_t i = 0; i < symmetryIslands.size(); i++) {
@@ -295,7 +294,7 @@ void PlacementSolver::buildInitialBStarTree() {
                           " height=" + std::to_string(symmetryIslands[i]->getHeight()));
     }
     
-    // Add regular modules
+    // Add regular modules, identify the clk module if it exists
     for (const auto& pair : regularModules) {
         // Skip null modules
         if (!pair.second) {
@@ -303,7 +302,15 @@ void PlacementSolver::buildInitialBStarTree() {
             continue;
         }
         
-        entities.push_back(pair.first);
+        // Check if this is the clk module
+        if (pair.first == "clk") {
+            hasClkModule = true;
+            clkModuleName = pair.first;
+            logGlobalPlacement("Found clk module: " + pair.first);
+        } else {
+            entities.push_back(pair.first);
+        }
+        
         entityDimensions[pair.first] = {
             pair.second->getWidth(),
             pair.second->getHeight()
@@ -338,6 +345,12 @@ void PlacementSolver::buildInitialBStarTree() {
                           (isIsland ? "true" : "false") + ")");
     }
     
+    // Create clk node if it exists
+    if (hasClkModule) {
+        clkNode = new BStarNode(clkModuleName, false);
+        logGlobalPlacement("Created node for clk module: " + clkModuleName);
+    }
+    
     // Keep track of nodes already placed as children to prevent multiple parents
     std::unordered_set<std::string> placedAsChild;
     
@@ -347,6 +360,13 @@ void PlacementSolver::buildInitialBStarTree() {
         bstarRoot = nodeMap[entities[0]];
         placedAsChild.insert(entities[0]);
         logGlobalPlacement("Set root to: " + entities[0]);
+        
+        // If we have a clk module, make it the right child of the root
+        // This will place it above the root
+        if (hasClkModule) {
+            bstarRoot->right = clkNode;
+            logGlobalPlacement("Placed clk module as right child of root (will be above symmetry groups)");
+        }
         
         // Queue for BFS traversal
         std::queue<BStarNode*> nodeQueue;
@@ -372,7 +392,8 @@ void PlacementSolver::buildInitialBStarTree() {
             }
             
             // Try to add right child (placed on top of parent)
-            if (entityIndex < entities.size()) {
+            // Skip if current node is the root and we already placed the clk module
+            if (entityIndex < entities.size() && !(currentParent == bstarRoot && hasClkModule)) {
                 const std::string& rightChildName = entities[entityIndex++];
                 BStarNode* rightChild = nodeMap[rightChildName];
                 
@@ -388,10 +409,24 @@ void PlacementSolver::buildInitialBStarTree() {
         if (placedAsChild.size() != entities.size()) {
             logGlobalPlacement("WARNING: Not all entities were placed in the tree!");
             
-            // This should never happen with BFS, but let's add a safety check
+            // Handle any unplaced entities
             for (const auto& entity : entities) {
                 if (placedAsChild.find(entity) == placedAsChild.end()) {
                     logGlobalPlacement("Entity not placed: " + entity);
+                    // Find a spot for this entity
+                    for (const auto& pair : nodeMap) {
+                        if (pair.second->left == nullptr) {
+                            pair.second->left = nodeMap[entity];
+                            placedAsChild.insert(entity);
+                            logGlobalPlacement("Placed unplaced entity " + entity + " as left child of " + pair.first);
+                            break;
+                        } else if (pair.second->right == nullptr && !(pair.second == bstarRoot && hasClkModule)) {
+                            pair.second->right = nodeMap[entity];
+                            placedAsChild.insert(entity);
+                            logGlobalPlacement("Placed unplaced entity " + entity + " as right child of " + pair.first);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -416,7 +451,7 @@ void PlacementSolver::buildInitialBStarTree() {
         countNodes(bstarRoot);
         
         logGlobalPlacement("Tree building complete: " + std::to_string(totalNodes) + 
-                          " nodes out of " + std::to_string(entities.size()) + " entities");
+                          " nodes out of " + std::to_string(entities.size() + (hasClkModule ? 1 : 0)) + " entities");
     }
 }
 
@@ -1595,189 +1630,644 @@ void PlacementSolver::setTimeLimit(int seconds) {
 
 // Solve the placement problem
 bool PlacementSolver::solve() {
-    // Record start time
-    startTime = std::chrono::steady_clock::now();
-    
-    // Before packing, ensure traversal containers are empty
-    preorderTraversal.clear();
-    inorderTraversal.clear();
-    preorderNodeNames.clear();
-    inorderNodeNames.clear();
-    
-    // Initial packing
-    packBStarTree();
-    
-    // Calculate initial solution metrics
-    solutionArea = calculateArea();
-    solutionWirelength = calculateWirelength();
-    
-    // Initialize best solution
-    bestSolutionArea = solutionArea;
-    bestSolutionWirelength = solutionWirelength;
-    updateBestSolution();
-    
-    // Also backup the initial tree structure
-    backupBStarTree();
-    bestBStarTreeBackup = bstarTreeBackup;
-    
-    std::cout << "Initial solution - Area: " << solutionArea << ", Cost: " << calculateCost() << std::endl;
-    
-    // Simulated annealing
-    double temperature = initialTemperature;
-    int iterations = 0;
-    int noImprovementCount = 0;
-    
-    while (temperature > finalTemperature && noImprovementCount < noImprovementLimit) {
-        bool improved = false;
+    try {
+        // Record start time
+        startTime = std::chrono::steady_clock::now();
         
-        for (int i = 0; i < iterationsPerTemperature; i++) {
-            // Check time limit
-            auto currentTime = std::chrono::steady_clock::now();
-            double elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                currentTime - startTime).count();
+        // Initialize logging
+        Logger::log("Starting analog placement solver with symmetry constraints");
+        Logger::log("Using integrated approach: ASF-B*-trees for symmetry islands and Slicing for global placement");
+        
+        /********************************************************************
+         * PHASE 1: Initialize symmetry islands using ASF-B*-trees
+         ********************************************************************/
+        Logger::log("PHASE 1: Initializing symmetry islands");
+        
+        // Build ASF-B*-trees for each symmetry group
+        for (size_t i = 0; i < symmetryIslands.size(); i++) {
+            auto island = symmetryIslands[i];
+            if (!island) continue;
             
-            if (elapsed >= timeLimit) {
-                std::cout << "Time limit reached." << std::endl;
-                break;
+            // Pack the ASF-B*-tree to get internal layout for the symmetry island
+            Logger::log("Packing ASF-B*-tree for symmetry island " + std::to_string(i));
+            if (!island->getASFBStarTree()->pack()) {
+                Logger::log("ERROR: Failed to pack ASF-B*-tree for symmetry island " + std::to_string(i));
+                return false;
             }
             
-            // Clear traversal containers before each iteration
-            preorderTraversal.clear();
-            inorderTraversal.clear();
-            preorderNodeNames.clear();
-            inorderNodeNames.clear();
+            // Update bounding box of symmetry island
+            island->updateBoundingBox();
             
-            // Save current state and metrics
-            int oldArea = solutionArea;
-            double oldWirelength = solutionWirelength;
-            double oldCost = calculateCost();
-            
-            // Backup current tree structure
-            backupBStarTree();
-            
-            // Create backup of module positions
-            std::map<std::string, std::pair<int, int>> oldPositions;
-            std::map<std::string, bool> oldRotations;
-            
-            for (const auto& pair : regularModules) {
-                if (pair.second) {
-                    oldPositions[pair.first] = {pair.second->getX(), pair.second->getY()};
-                    oldRotations[pair.first] = pair.second->getRotated();
-                }
-            }
-            
-            // Create backup of islands
-            std::vector<std::pair<int, int>> oldIslandPositions;
-            for (const auto& island : symmetryIslands) {
-                if (island) {
-                    oldIslandPositions.push_back({island->getX(), island->getY()});
-                }
-            }
-            
-            // Perturb the solution
-            bool perturbSuccess = perturb();
-            
-            if (perturbSuccess) {
-                // Before re-packing, clear traversal containers
-                preorderTraversal.clear();
-                inorderTraversal.clear();
-                preorderNodeNames.clear();
-                inorderNodeNames.clear();
-                
-                // Re-pack
-                packBStarTree();
-                
-                // Calculate new metrics
-                int newArea = calculateArea();
-                double newWirelength = calculateWirelength();
-                double newCost = areaWeight * newArea + wirelengthWeight * newWirelength;
-                
-                // Check if we should accept this solution
-                double costDelta = newCost - oldCost;
-                bool accept = false;
-                
-                if (costDelta <= 0) {
-                    // Accept improvement
-                    accept = true;
-                    
-                    if (newArea < bestSolutionArea) {
-                        // Found a new best solution
-                        bestSolutionArea = newArea;
-                        bestSolutionWirelength = newWirelength;
-                        updateBestSolution();
-                        bestBStarTreeBackup = bstarTreeBackup; // Save tree structure too
-                        improved = true;
-                        noImprovementCount = 0;
-                        
-                        std::cout << "New best solution - Area: " << newArea 
-                                  << ", Cost: " << newCost 
-                                  << ", Temp: " << temperature << std::endl;
-                    }
-                } else {
-                    // Accept with probability based on temperature
-                    double acceptProb = exp(-costDelta / temperature);
-                    if (static_cast<double>(std::rand()) / RAND_MAX < acceptProb) {
-                        accept = true;
-                    }
-                }
-                
-                if (accept) {
-                    // Update solution metrics
-                    solutionArea = newArea;
-                    solutionWirelength = newWirelength;
-                } else {
-                    // Restore the tree structure - clear traversal containers first
-                    preorderTraversal.clear();
-                    inorderTraversal.clear();
-                    preorderNodeNames.clear();
-                    inorderNodeNames.clear();
-                    
-                    // Restore the tree
-                    restoreBStarTree();
-                    
-                    // Restore old positions
-                    for (const auto& pair : oldPositions) {
-                        if (regularModules.find(pair.first) != regularModules.end() && 
-                            regularModules[pair.first]) {
-                            regularModules[pair.first]->setPosition(pair.second.first, pair.second.second);
-                            regularModules[pair.first]->setRotation(oldRotations[pair.first]);
-                        }
-                    }
-                    
-                    // Restore islands
-                    for (size_t i = 0; i < symmetryIslands.size() && i < oldIslandPositions.size(); i++) {
-                        if (symmetryIslands[i]) {
-                            symmetryIslands[i]->setPosition(oldIslandPositions[i].first, oldIslandPositions[i].second);
-                        }
-                    }
-                    
-                    // Restore metrics
-                    solutionArea = oldArea;
-                    solutionWirelength = oldWirelength;
-                }
-            }
-            
-            iterations++;
+            // Log symmetry island dimensions
+            Logger::log("Symmetry island " + std::to_string(i) + 
+                " dimensions: " + std::to_string(island->getWidth()) + "x" + 
+                std::to_string(island->getHeight()));
         }
         
-        // Update temperature
-        temperature *= coolingRate;
+        /********************************************************************
+         * PHASE 2: Create SlicingPlacementSolver and initialize data
+         ********************************************************************/
+        Logger::log("PHASE 2: Setting up slicing-based global placement");
         
-        if (!improved) {
-            noImprovementCount++;
+        // Create the FloorplanData for slicing
+        std::unique_ptr<FloorplanData> floorplanData = std::make_unique<FloorplanData>();
+        // No fixed outline for analog placement
+        floorplanData->setFloorplanDimensions(std::numeric_limits<int>::max(), 
+                                             std::numeric_limits<int>::max());
+        
+        // Mapping between slicing blocks and original modules/islands
+        std::unordered_map<int, std::pair<bool, size_t>> blockMapping; // <blockIdx, <isIsland, moduleIdx>>
+        int blockIndex = 0;
+        
+        // Add symmetry islands as blocks to the FloorplanData
+        for (size_t i = 0; i < symmetryIslands.size(); i++) {
+            auto island = symmetryIslands[i];
+            if (!island) continue;
+            
+            std::string name = "island_" + std::to_string(i);
+            Block* block = new Block(name, island->getWidth(), island->getHeight());
+            floorplanData->addBlock(block);
+            
+            // Store mapping: this block represents symmetry island i
+            blockMapping[blockIndex++] = {true, i};
+            
+            Logger::log("Added symmetry island " + std::to_string(i) + " as block " + 
+                std::to_string(blockIndex-1) + " with dimensions " + 
+                std::to_string(island->getWidth()) + "x" + 
+                std::to_string(island->getHeight()));
+        }
+        
+        // Add regular modules as blocks
+        for (const auto& pair : regularModules) {
+            const auto& moduleName = pair.first;
+            const auto& module = pair.second;
+            if (!module) continue;
+            
+            Block* block = new Block(moduleName, module->getWidth(), module->getHeight());
+            floorplanData->addBlock(block);
+            
+            // Store mapping: this block represents regular module with name moduleName
+            // Store the index in the regularModules map using distance
+            size_t moduleIdx = std::distance(regularModules.begin(), regularModules.find(moduleName));
+            blockMapping[blockIndex++] = {false, moduleIdx};
+            
+            Logger::log("Added regular module " + moduleName + " as block " + 
+                std::to_string(blockIndex-1) + " with dimensions " + 
+                std::to_string(module->getWidth()) + "x" + 
+                std::to_string(module->getHeight()));
+        }
+        
+        // Create and configure Simulated Annealing solver for slicing
+        auto optimizer = std::make_unique<SimulatedAnnealing>(floorplanData.get());
+        
+        /********************************************************************
+         * PHASE 3: Run global placement with slicing algorithm
+         ********************************************************************/
+        Logger::log("PHASE 3: Running global placement optimization");
+        
+        // Calculate remaining time
+        auto currentTime = std::chrono::steady_clock::now();
+        std::chrono::duration<double> elapsed = currentTime - startTime;
+        int remainingTimeSeconds = timeLimit - static_cast<int>(elapsed.count());
+        
+        // Run the optimizer
+        optimizer->run();
+        
+        // Get the best solution from the slicing algorithm
+        FloorplanSolution* slicingSolution = optimizer->getBestSolution();
+        
+        if (!slicingSolution) {
+            Logger::log("ERROR: No solution found by slicing algorithm");
+            return false;
+        }
+        
+        /********************************************************************
+         * PHASE 4: Apply the slicing solution to our modules
+         ********************************************************************/
+        Logger::log("PHASE 4: Applying global placement solution to modules");
+        
+        // Apply the slicing solution to our modules
+        for (int i = 0; i < floorplanData->getNumBlocks(); i++) {
+            Block* block = floorplanData->getBlock(i);
+            if (!block) continue;
+            
+            bool isRotated = block->isRotated();
+            int x = block->getX();
+            int y = block->getY();
+            
+            auto mapIt = blockMapping.find(i);
+            if (mapIt == blockMapping.end()) continue;
+            
+            bool isIsland = mapIt->second.first;
+            size_t entityIdx = mapIt->second.second;
+            
+            if (isIsland) {
+                // This block represents a symmetry island
+                if (entityIdx < symmetryIslands.size() && symmetryIslands[entityIdx]) {
+                    auto island = symmetryIslands[entityIdx];
+                    
+                    // If the island was rotated in the solution, rotate it
+                    if (isRotated) {
+                        // Check if island's current orientation matches the rotated state
+                        bool needsRotation = (island->getASFBStarTree()->getSymmetryGroup()->getType() == 
+                                            SymmetryType::VERTICAL);
+                        if (needsRotation) {
+                            island->rotate();
+                        }
+                    }
+                    
+                    // Set island position
+                    island->setPosition(x, y);
+                    
+                    Logger::log("Positioned symmetry island " + std::to_string(entityIdx) + 
+                        " at (" + std::to_string(x) + "," + std::to_string(y) + ")" +
+                        (isRotated ? " (rotated)" : ""));
+                }
+            } else {
+                // This block represents a regular module
+                auto moduleIt = std::next(regularModules.begin(), entityIdx);
+                if (moduleIt != regularModules.end()) {
+                    auto& moduleName = moduleIt->first;
+                    auto module = moduleIt->second;
+                    
+                    // Set rotation and position
+                    module->setRotation(isRotated);
+                    module->setPosition(x, y);
+                    
+                    Logger::log("Positioned regular module " + moduleName + 
+                        " at (" + std::to_string(x) + "," + std::to_string(y) + ")" +
+                        (isRotated ? " (rotated)" : ""));
+                }
+            }
+        }
+        
+        /********************************************************************
+         * PHASE 5: Calculate final metrics and update best solution
+         ********************************************************************/
+        Logger::log("PHASE 5: Calculating final metrics");
+        
+        // Calculate final area and wirelength
+        solutionArea = calculateArea();
+        solutionWirelength = calculateWirelength();
+        
+        // Update best solution
+        updateBestSolution();
+        
+        // Check for overlaps
+        bool hasOverlaps = false;
+        // Check regular modules vs regular modules
+        for (const auto& pair1 : regularModules) {
+            const auto& module1 = pair1.second;
+            int m1Left = module1->getX();
+            int m1Right = m1Left + module1->getWidth();
+            int m1Bottom = module1->getY();
+            int m1Top = m1Bottom + module1->getHeight();
+            
+            // Check against other modules
+            for (const auto& pair2 : regularModules) {
+                if (pair1.first == pair2.first) continue; // Skip self
+                
+                const auto& module2 = pair2.second;
+                int m2Left = module2->getX();
+                int m2Right = m2Left + module2->getWidth();
+                int m2Bottom = module2->getY();
+                int m2Top = m2Bottom + module2->getHeight();
+                
+                if (!(m1Right <= m2Left || m2Right <= m1Left || 
+                      m1Top <= m2Bottom || m2Top <= m1Bottom)) {
+                    Logger::log("ERROR: Overlap detected between " + pair1.first + 
+                        " and " + pair2.first);
+                    hasOverlaps = true;
+                }
+            }
+            
+            // Check against symmetry islands
+            for (const auto& island : symmetryIslands) {
+                int islandLeft = island->getX();
+                int islandRight = islandLeft + island->getWidth();
+                int islandBottom = island->getY();
+                int islandTop = islandBottom + island->getHeight();
+                
+                if (!(m1Right <= islandLeft || islandRight <= m1Left || 
+                      m1Top <= islandBottom || islandTop <= m1Bottom)) {
+                    Logger::log("ERROR: Overlap detected between " + pair1.first + 
+                        " and symmetry island");
+                    hasOverlaps = true;
+                }
+            }
+        }
+        
+        // Check symmetry islands vs symmetry islands
+        for (size_t i = 0; i < symmetryIslands.size(); i++) {
+            const auto& island1 = symmetryIslands[i];
+            int i1Left = island1->getX();
+            int i1Right = i1Left + island1->getWidth();
+            int i1Bottom = island1->getY();
+            int i1Top = i1Bottom + island1->getHeight();
+            
+            for (size_t j = i + 1; j < symmetryIslands.size(); j++) {
+                const auto& island2 = symmetryIslands[j];
+                int i2Left = island2->getX();
+                int i2Right = i2Left + island2->getWidth();
+                int i2Bottom = island2->getY();
+                int i2Top = i2Bottom + island2->getHeight();
+                
+                if (!(i1Right <= i2Left || i2Right <= i1Left || 
+                      i1Top <= i2Bottom || i2Top <= i1Bottom)) {
+                    Logger::log("ERROR: Overlap detected between symmetry islands " + 
+                        std::to_string(i) + " and " + std::to_string(j));
+                    hasOverlaps = true;
+                }
+            }
+        }
+        
+        if (hasOverlaps) {
+            Logger::log("WARNING: Final solution has overlaps. Attempting repair...");
+            if (repairOverlaps()) {
+                Logger::log("Successfully repaired overlaps");
+                // Recalculate area after repair
+                solutionArea = calculateArea();
+                updateBestSolution();
+            } else {
+                Logger::log("Failed to repair all overlaps");
+            }
+        } else {
+            Logger::log("Final solution has no overlaps");
+        }
+        
+        // Log final solution statistics
+        Logger::log("Final solution - Area: " + std::to_string(solutionArea));
+        
+        // Calculate execution time
+        auto endTime = std::chrono::steady_clock::now();
+        std::chrono::duration<double> executionTime = endTime - startTime;
+        Logger::log("Total execution time: " + std::to_string(executionTime.count()) + " seconds");
+        
+        return !hasOverlaps;
+        
+    } catch (const std::exception& e) {
+        Logger::log("Exception in solve method: " + std::string(e.what()));
+        return false;
+    } catch (...) {
+        Logger::log("Unknown exception in solve method");
+        return false;
+    }
+}
+
+/**
+ * Attempt to repair any overlaps in the final solution
+ * This is a simplified version of the repairFloorplan method from the slicing algorithm
+ */
+bool PlacementSolver::repairOverlaps() {
+    Logger::log("Attempting to repair overlaps in placement");
+    
+    bool hasOverlaps = true;
+    int iterations = 0;
+    const int maxIterations = 300;
+    
+    std::vector<std::pair<void*, std::pair<int, int>>> originalPositions;
+    
+    // Store original positions
+    for (const auto& pair : regularModules) {
+        const auto& module = pair.second;
+        originalPositions.push_back({module.get(), {module->getX(), module->getY()}});
+    }
+    
+    for (const auto& island : symmetryIslands) {
+        originalPositions.push_back({island.get(), {island->getX(), island->getY()}});
+    }
+    
+    while (hasOverlaps && iterations < maxIterations) {
+        hasOverlaps = false;
+        iterations++;
+        
+        // First check for overlaps between regular modules
+        for (auto& pair1 : regularModules) {
+            auto& module1 = pair1.second;
+            int m1Left = module1->getX();
+            int m1Right = m1Left + module1->getWidth();
+            int m1Bottom = module1->getY();
+            int m1Top = m1Bottom + module1->getHeight();
+            
+            // Check against other modules
+            for (auto& pair2 : regularModules) {
+                if (pair1.first == pair2.first) continue; // Skip self
+                
+                auto& module2 = pair2.second;
+                int m2Left = module2->getX();
+                int m2Right = m2Left + module2->getWidth();
+                int m2Bottom = module2->getY();
+                int m2Top = m2Bottom + module2->getHeight();
+                
+                // Check for overlap
+                if (!(m1Right <= m2Left || m2Right <= m1Left || 
+                     m1Top <= m2Bottom || m2Top <= m1Bottom)) {
+                    
+                    hasOverlaps = true;
+                    
+                    // Calculate overlap in both x and y directions
+                    int overlapX = std::min(m1Right, m2Right) - std::max(m1Left, m2Left);
+                    int overlapY = std::min(m1Top, m2Top) - std::max(m1Bottom, m2Bottom);
+                    
+                    // Move along direction with smallest overlap
+                    if (overlapX <= overlapY) {
+                        // Horizontal shift
+                        if (m1Left < m2Left) {
+                            module1->setPosition(m1Left - overlapX - 1, module1->getY());
+                        } else {
+                            module1->setPosition(m2Left - overlapX - 1, module2->getY());
+                        }
+                    } else {
+                        // Vertical shift
+                        if (m1Bottom < m2Bottom) {
+                            module1->setPosition(module1->getX(), m1Bottom - overlapY - 1);
+                        } else {
+                            module2->setPosition(module2->getX(), m2Bottom - overlapY - 1);
+                        }
+                    }
+                    
+                    // Only fix one overlap per iteration to avoid oscillation
+                    break;
+                }
+            }
+            
+            if (hasOverlaps) break;
+            
+            // Check against symmetry islands
+            for (auto& island : symmetryIslands) {
+                int islandLeft = island->getX();
+                int islandRight = islandLeft + island->getWidth();
+                int islandBottom = island->getY();
+                int islandTop = islandBottom + island->getHeight();
+                
+                // Check for overlap
+                if (!(m1Right <= islandLeft || islandRight <= m1Left || 
+                     m1Top <= islandBottom || islandTop <= m1Bottom)) {
+                    
+                    hasOverlaps = true;
+                    
+                    // Calculate overlap in both x and y directions
+                    int overlapX = std::min(m1Right, islandRight) - std::max(m1Left, islandLeft);
+                    int overlapY = std::min(m1Top, islandTop) - std::max(m1Bottom, islandBottom);
+                    
+                    // Move along direction with smallest overlap
+                    if (overlapX <= overlapY) {
+                        // Horizontal shift - prefer moving the module, not the island
+                        if (m1Left < islandLeft) {
+                            module1->setPosition(m1Left - overlapX - 1, module1->getY());
+                        } else {
+                            module1->setPosition(islandRight + 1, module1->getY());
+                        }
+                    } else {
+                        // Vertical shift
+                        if (m1Bottom < islandBottom) {
+                            module1->setPosition(module1->getX(), m1Bottom - overlapY - 1);
+                        } else {
+                            module1->setPosition(module1->getX(), islandTop + 1);
+                        }
+                    }
+                    
+                    // Only fix one overlap per iteration
+                    break;
+                }
+            }
+            
+            if (hasOverlaps) break;
+        }
+        
+        // Check for overlaps between symmetry islands
+        if (!hasOverlaps) {
+            for (size_t i = 0; i < symmetryIslands.size(); i++) {
+                auto& island1 = symmetryIslands[i];
+                int i1Left = island1->getX();
+                int i1Right = i1Left + island1->getWidth();
+                int i1Bottom = island1->getY();
+                int i1Top = i1Bottom + island1->getHeight();
+                
+                for (size_t j = i + 1; j < symmetryIslands.size(); j++) {
+                    auto& island2 = symmetryIslands[j];
+                    int i2Left = island2->getX();
+                    int i2Right = i2Left + island2->getWidth();
+                    int i2Bottom = island2->getY();
+                    int i2Top = i2Bottom + island2->getHeight();
+                    
+                    // Check for overlap
+                    if (!(i1Right <= i2Left || i2Right <= i1Left || 
+                         i1Top <= i2Bottom || i2Top <= i1Bottom)) {
+                        
+                        hasOverlaps = true;
+                        
+                        // Calculate overlap in both x and y directions
+                        int overlapX = std::min(i1Right, i2Right) - std::max(i1Left, i2Left);
+                        int overlapY = std::min(i1Top, i2Top) - std::max(i1Bottom, i2Bottom);
+                        
+                        // Move along direction with smallest overlap
+                        if (overlapX <= overlapY) {
+                            // Horizontal shift
+                            if (i1Left < i2Left) {
+                                island1->setPosition(i1Left - overlapX - 1, i1Bottom);
+                            } else {
+                                island2->setPosition(i2Left - overlapX - 1, i2Bottom);
+                            }
+                        } else {
+                            // Vertical shift
+                            if (i1Bottom < i2Bottom) {
+                                island1->setPosition(i1Left, i1Bottom - overlapY - 1);
+                            } else {
+                                island2->setPosition(i2Left, i2Bottom - overlapY - 1);
+                            }
+                        }
+                        
+                        // Only fix one overlap per iteration
+                        break;
+                    }
+                }
+                
+                if (hasOverlaps) break;
+            }
+        }
+        
+        // Every 50 iterations, try a more drastic approach
+        if (hasOverlaps && iterations % 50 == 0) {
+            Logger::log("Trying more drastic repair on iteration " + std::to_string(iterations));
+            
+            // Spread out all elements more aggressively
+            int spreadFactor = iterations / 50 * 10; // Increases as iterations increase
+            
+            // Sort all modules/islands by area (largest first)
+            std::vector<std::pair<void*, int>> entitiesByArea;
+            
+            for (const auto& pair : regularModules) {
+                const auto& module = pair.second;
+                entitiesByArea.push_back({module.get(), module->getWidth() * module->getHeight()});
+            }
+            
+            for (const auto& island : symmetryIslands) {
+                entitiesByArea.push_back({island.get(), island->getWidth() * island->getHeight()});
+            }
+            
+            std::sort(entitiesByArea.begin(), entitiesByArea.end(), 
+                     [](const auto& a, const auto& b) { return a.second > b.second; });
+            
+            // Place largest entities first in a grid-like pattern
+            int gridSize = static_cast<int>(std::sqrt(entitiesByArea.size()));
+            if (gridSize < 1) gridSize = 1;
+            
+            int gridX = 0;
+            int gridY = 0;
+            int rowMaxHeight = 0;
+            
+            for (const auto& entity : entitiesByArea) {
+                int width, height;
+                
+                // Check if it's a module or island
+                bool isModule = false;
+                for (const auto& pair : regularModules) {
+                    if (pair.second.get() == entity.first) {
+                        isModule = true;
+                        width = pair.second->getWidth();
+                        height = pair.second->getHeight();
+                        pair.second->setPosition(gridX, gridY);
+                        break;
+                    }
+                }
+                
+                if (!isModule) {
+                    for (size_t i = 0; i < symmetryIslands.size(); i++) {
+                        if (symmetryIslands[i].get() == entity.first) {
+                            width = symmetryIslands[i]->getWidth();
+                            height = symmetryIslands[i]->getHeight();
+                            symmetryIslands[i]->setPosition(gridX, gridY);
+                            break;
+                        }
+                    }
+                }
+                
+                // Update grid position
+                gridX += width + spreadFactor;
+                rowMaxHeight = std::max(rowMaxHeight, height);
+                
+                // Move to next row if needed
+                if (++gridX % gridSize == 0) {
+                    gridX = 0;
+                    gridY += rowMaxHeight + spreadFactor;
+                    rowMaxHeight = 0;
+                }
+            }
         }
     }
     
-    std::cout << "Annealing complete - " << iterations << " iterations" << std::endl;
+    // Final check for overlaps
+    hasOverlaps = false;
     
-    // Restore best solution including tree structure
-    bstarTreeBackup = bestBStarTreeBackup;
-    restoreBStarTree();
-    restoreBestSolution();
+    // Check regular modules vs regular modules
+    for (const auto& pair1 : regularModules) {
+        const auto& module1 = pair1.second;
+        int m1Left = module1->getX();
+        int m1Right = m1Left + module1->getWidth();
+        int m1Bottom = module1->getY();
+        int m1Top = m1Bottom + module1->getHeight();
+        
+        // Check against other modules
+        for (const auto& pair2 : regularModules) {
+            if (pair1.first == pair2.first) continue; // Skip self
+            
+            const auto& module2 = pair2.second;
+            int m2Left = module2->getX();
+            int m2Right = m2Left + module2->getWidth();
+            int m2Bottom = module2->getY();
+            int m2Top = m2Bottom + module2->getHeight();
+            
+            if (!(m1Right <= m2Left || m2Right <= m1Left || 
+                 m1Top <= m2Bottom || m2Top <= m1Bottom)) {
+                hasOverlaps = true;
+                break;
+            }
+        }
+        
+        if (hasOverlaps) break;
+        
+        // Check against symmetry islands
+        for (const auto& island : symmetryIslands) {
+            int islandLeft = island->getX();
+            int islandRight = islandLeft + island->getWidth();
+            int islandBottom = island->getY();
+            int islandTop = islandBottom + island->getHeight();
+            
+            if (!(m1Right <= islandLeft || islandRight <= m1Left || 
+                 m1Top <= islandBottom || islandTop <= m1Bottom)) {
+                hasOverlaps = true;
+                break;
+            }
+        }
+        
+        if (hasOverlaps) break;
+    }
     
-    std::cout << "Final solution - Area: " << solutionArea << std::endl;
+    // Check symmetry islands vs symmetry islands
+    if (!hasOverlaps) {
+        for (size_t i = 0; i < symmetryIslands.size(); i++) {
+            const auto& island1 = symmetryIslands[i];
+            int i1Left = island1->getX();
+            int i1Right = i1Left + island1->getWidth();
+            int i1Bottom = island1->getY();
+            int i1Top = i1Bottom + island1->getHeight();
+            
+            for (size_t j = i + 1; j < symmetryIslands.size(); j++) {
+                const auto& island2 = symmetryIslands[j];
+                int i2Left = island2->getX();
+                int i2Right = i2Left + island2->getWidth();
+                int i2Bottom = island2->getY();
+                int i2Top = i2Bottom + island2->getHeight();
+                
+                if (!(i1Right <= i2Left || i2Right <= i1Left || 
+                     i1Top <= i2Bottom || i2Top <= i1Bottom)) {
+                    hasOverlaps = true;
+                    break;
+                }
+            }
+            
+            if (hasOverlaps) break;
+        }
+    }
     
-    return true;
+    // If still has overlaps, revert to original positions
+    if (hasOverlaps && iterations >= maxIterations) {
+        Logger::log("Overlap repair failed after " + std::to_string(iterations) + 
+                  " iterations. Reverting to original positions.");
+        
+        // Restore original positions
+        for (const auto& entry : originalPositions) {
+            void* entity = entry.first;
+            int x = entry.second.first;
+            int y = entry.second.second;
+            
+            // Check if it's a module
+            bool found = false;
+            for (auto& pair : regularModules) {
+                if (pair.second.get() == entity) {
+                    pair.second->setPosition(x, y);
+                    found = true;
+                    break;
+                }
+            }
+            
+            // If not found, must be an island
+            if (!found) {
+                for (auto& island : symmetryIslands) {
+                    if (island.get() == entity) {
+                        island->setPosition(x, y);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    Logger::log("Overlap repair completed after " + std::to_string(iterations) + " iterations");
+    return !hasOverlaps;
 }
 
 // Get solution area

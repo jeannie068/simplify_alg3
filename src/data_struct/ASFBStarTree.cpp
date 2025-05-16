@@ -1,5 +1,4 @@
-// ASFBStarTree.hpp
-#pragma once
+// ASFBStarTree.cpp
 
 #include <memory>
 #include <vector>
