@@ -120,7 +120,7 @@ private:
                 auto island = symmetryIslands[islandIndex];
                 
                 // If island was rotated in the solution, rotate it
-                if (!rotated) {
+                if (rotated) {
                     island->rotate();
                 }
                 

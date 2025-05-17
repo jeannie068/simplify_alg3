@@ -23,8 +23,8 @@ public:
 private:
     FloorplanData* data;
     FloorplanSolution* bestSolution;
-    std::vector<SlicingTreeNode*> blockNodes;
-    std::vector<SlicingTreeNode*> cutNodes;
+    std::vector<std::shared_ptr<SlicingTreeNode>> blockNodes;
+    std::vector<std::shared_ptr<SlicingTreeNode>> cutNodes;
 
     // Logger members
     mutable std::ofstream slicingLogFile;
@@ -53,7 +53,7 @@ private:
     std::vector<int> perturbExpression(const std::vector<int>& expression, int moveType) const;
     
     // Slicing tree construction and evaluation
-    SlicingTreeNode* buildSlicingTree(const std::vector<int>& expression);
+    std::shared_ptr<SlicingTreeNode> buildSlicingTree(const std::vector<int>& expression);
     void setBlockPositions(SlicingTreeNode* node, int x, int y, int recordIndex);
     
     // Calculate the cost of a solution

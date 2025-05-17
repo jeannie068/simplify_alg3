@@ -787,17 +787,6 @@ double PlacementSolver::calculateWirelength() {
     // For this simplified version, we'll use a proxy: sum of distances from modules to the origin
     double wirelength = 0.0;
     
-    // Include symmetry islands
-    for (const auto& island : symmetryIslands) {
-        wirelength += island->getX() + island->getY();
-    }
-    
-    // Include regular modules
-    for (const auto& pair : regularModules) {
-        const auto& module = pair.second;
-        wirelength += module->getX() + module->getY();
-    }
-    
     return wirelength;
 }
 
@@ -1768,6 +1757,7 @@ bool PlacementSolver::solve() {
                     
                     // If the island was rotated in the solution, rotate it
                     if (isRotated) {
+                        
                         // Check if island's current orientation matches the rotated state
                         bool needsRotation = (island->getASFBStarTree()->getSymmetryGroup()->getType() == 
                                             SymmetryType::VERTICAL);
@@ -1882,15 +1872,7 @@ bool PlacementSolver::solve() {
         }
         
         if (hasOverlaps) {
-            Logger::log("WARNING: Final solution has overlaps. Attempting repair...");
-            if (repairOverlaps()) {
-                Logger::log("Successfully repaired overlaps");
-                // Recalculate area after repair
-                solutionArea = calculateArea();
-                updateBestSolution();
-            } else {
-                Logger::log("Failed to repair all overlaps");
-            }
+            Logger::log("WARNING: Final solution has overlaps.");
         } else {
             Logger::log("Final solution has no overlaps");
         }
@@ -1913,6 +1895,7 @@ bool PlacementSolver::solve() {
         return false;
     }
 }
+
 
 /**
  * Attempt to repair any overlaps in the final solution

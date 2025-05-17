@@ -362,6 +362,8 @@ public:
      */
     bool solve();
 
+    void applyOptimizedPositions(const FloorplanSolution *solution);
+
     bool repairOverlaps();
 
     /**

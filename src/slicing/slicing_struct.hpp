@@ -93,6 +93,7 @@ public:
     SlicingTreeNode* leftChild;
     SlicingTreeNode* rightChild;
     std::vector<ShapeRecord> shapeRecords;
+    void* userData;
 };
 
 // Solution representation for the floorplan

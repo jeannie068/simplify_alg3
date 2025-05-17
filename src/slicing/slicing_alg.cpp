@@ -86,15 +86,15 @@ SimulatedAnnealing::SimulatedAnnealing(FloorplanData* data)
     : data(data), bestSolution(new FloorplanSolution(data)),
       slicingDebugEnabled(false) {  // Initialize to false first
     
-    // Initialize block nodes and cut nodes
+    // Initialize block nodes and cut nodes with shared_ptr
     for (int i = 0; i < data->getNumBlocks(); ++i) {
         Block* block = data->getBlock(i);
-        blockNodes.push_back(new SlicingTreeNode(SlicingTreeNode::BLOCK, block));
+        blockNodes.push_back(std::make_shared<SlicingTreeNode>(SlicingTreeNode::BLOCK, block));
     }
     
     // (n-1) cut nodes for n blocks
     for (int i = 0; i < data->getNumBlocks() - 1; ++i) {
-        cutNodes.push_back(new SlicingTreeNode());
+        cutNodes.push_back(std::make_shared<SlicingTreeNode>());
     }
     
     // Seed random number generator
@@ -112,27 +112,14 @@ SimulatedAnnealing::SimulatedAnnealing(FloorplanData* data)
 }
 
 SimulatedAnnealing::~SimulatedAnnealing() {
-    // Close log file if open
+    // Close log file
     if (slicingLogFile.is_open()) {
-        try {
-            slicingLogFile << "Closing log file" << std::endl;
-            slicingLogFile.close();
-        } catch (...) {
-            // Silent catch to prevent destructor from throwing
-        }
+        slicingLogFile.close();
     }
     
-    // Clean up other resources
+    // Delete bestSolution which is owned exclusively by this class
     delete bestSolution;
-    
-    // Clean up nodes
-    for (SlicingTreeNode* node : blockNodes) {
-        delete node;
-    }
-    
-    for (SlicingTreeNode* node : cutNodes) {
-        delete node;
-    }
+
 }
 
 void SimulatedAnnealing::run() {
@@ -332,12 +319,13 @@ void SimulatedAnnealing::run() {
 }
 
 // Calculate weighted area of a solution
-int SimulatedAnnealing::calculateArea(const vector<int>& expression) {
-    SlicingTreeNode* root = buildSlicingTree(expression);
+int SimulatedAnnealing::calculateArea(const std::vector<int>& expression) {
+    logSlicingPlacement("In SimulatedAnnealing::calculateArea");
+    auto root = buildSlicingTree(expression);
     
-    if (root == nullptr || root->shapeRecords.empty()) {
+    if (!root || root->shapeRecords.empty()) {
         logSlicingPlacement("Error: Failed to build valid tree for area calculation");
-        return numeric_limits<int>::max();
+        return std::numeric_limits<int>::max();
     }
     
     // Select an appropriate shape record - for analog placement with no fixed outline,
@@ -356,7 +344,7 @@ int SimulatedAnnealing::calculateArea(const vector<int>& expression) {
     }
     
     // Set block positions using the best shape
-    setBlockPositions(root, 0, 0, bestRecordIndex);
+    setBlockPositions(root.get(), 0, 0, bestRecordIndex);
     
     // Calculate total area by finding the bounding box of all blocks
     int minX = std::numeric_limits<int>::max();
@@ -368,6 +356,8 @@ int SimulatedAnnealing::calculateArea(const vector<int>& expression) {
         Block* block = data->getBlock(i);
         int blockWidth = block->isRotated() ? block->getHeight() : block->getWidth();
         int blockHeight = block->isRotated() ? block->getWidth() : block->getHeight();
+        logSlicingPlacement("block index" + to_string(i) + " block x: " + to_string(block->getX()) + " block y: " + to_string(block->getY()) + 
+            " block width: " + to_string(blockWidth) + " block height: " + to_string(blockHeight));
         
         minX = std::min(minX, block->getX());
         minY = std::min(minY, block->getY());
@@ -378,8 +368,7 @@ int SimulatedAnnealing::calculateArea(const vector<int>& expression) {
     // Calculate bounding box area
     int totalArea = (maxX - minX) * (maxY - minY);
     
-    // Clean up
-    delete root;
+    // No need to manually delete root anymore, shared_ptr handles it automatically
     
     return totalArea;
 }
@@ -913,9 +902,9 @@ vector<int> SimulatedAnnealing::perturbExpression(const vector<int>& expression,
     return expression;
 }
 
-SlicingTreeNode* SimulatedAnnealing::buildSlicingTree(const vector<int>& expression) {
+std::shared_ptr<SlicingTreeNode> SimulatedAnnealing::buildSlicingTree(const std::vector<int>& expression) {
     size_t cutIndex = 0;
-    stack<SlicingTreeNode*> nodeStack;
+    std::stack<std::shared_ptr<SlicingTreeNode>> nodeStack;
     
     try {
         // Validate expression
@@ -944,7 +933,7 @@ SlicingTreeNode* SimulatedAnnealing::buildSlicingTree(const vector<int>& express
         // Final check: n operands and n-1 operators
         if (operands != operators + 1) {
             logSlicingPlacement("Error: Expression has invalid operand/operator count");
-            logSlicingPlacement("Operands: " + to_string(operands) + ", Operators: " + to_string(operators));
+            logSlicingPlacement("Operands: " + std::to_string(operands) + ", Operators: " + std::to_string(operators));
             return nullptr;
         }
         
@@ -952,10 +941,12 @@ SlicingTreeNode* SimulatedAnnealing::buildSlicingTree(const vector<int>& express
         for (int id : expression) {
             if (!isCut(id)) {
                 // Ensure valid block index
-                if (id < 0 || id >= data->getNumBlocks()) {
-                    logSlicingPlacement("Error: Invalid block index: " + to_string(id));
+                if (id < 0 || id >= static_cast<int>(blockNodes.size())) {
+                    logSlicingPlacement("Error: Invalid block index: " + std::to_string(id));
                     return nullptr;
                 }
+                
+                // Store a copy of the shared_ptr in the stack
                 nodeStack.push(blockNodes[id]);
             } else {
                 // Need at least 2 nodes for a cut
@@ -966,16 +957,36 @@ SlicingTreeNode* SimulatedAnnealing::buildSlicingTree(const vector<int>& express
                 
                 // Ensure valid cut index
                 if (cutIndex >= cutNodes.size()) {
-                    logSlicingPlacement("Error: Cut index out of bounds: " + to_string(cutIndex));
+                    logSlicingPlacement("Error: Cut index out of bounds: " + std::to_string(cutIndex));
                     return nullptr;
                 }
                 
-                SlicingTreeNode* cutNode = cutNodes[cutIndex++];
+                // Get the cut node and keep a copy of the shared_ptr
+                std::shared_ptr<SlicingTreeNode> cutNode = cutNodes[cutIndex++];
+                
+                // Safe handling of the stack
+                auto rightChild = nodeStack.top();
+                nodeStack.pop();
+                auto leftChild = nodeStack.top();
+                nodeStack.pop();
+                
+                // Set the cut node properties
                 cutNode->type = id;
-                cutNode->rightChild = nodeStack.top();
-                nodeStack.pop();
-                cutNode->leftChild = nodeStack.top();
-                nodeStack.pop();
+                cutNode->rightChild = rightChild.get(); // Still using raw pointer for child links
+                cutNode->leftChild = leftChild.get();   // Still using raw pointer for child links
+                
+                // Keep the shared_ptrs in memory by storing them in the cut node
+                // Adding this custom field to track ownership
+                if (!cutNode->userData) {
+                    cutNode->userData = new std::vector<std::shared_ptr<SlicingTreeNode>>();
+                }
+                
+                // Store the shared pointers to maintain ownership
+                auto childPtrs = static_cast<std::vector<std::shared_ptr<SlicingTreeNode>>*>(cutNode->userData);
+                childPtrs->push_back(leftChild);
+                childPtrs->push_back(rightChild);
+                
+                // Update shape records and push to stack
                 cutNode->updateShapeRecords();
                 nodeStack.push(cutNode);
             }
@@ -983,16 +994,34 @@ SlicingTreeNode* SimulatedAnnealing::buildSlicingTree(const vector<int>& express
         
         // Should have exactly one node left
         if (nodeStack.size() != 1) {
-            logSlicingPlacement("Error: Invalid expression, final stack size: " + to_string(nodeStack.size()));
+            logSlicingPlacement("Error: Invalid expression, final stack size: " + std::to_string(nodeStack.size()));
             return nullptr;
         }
         
         return nodeStack.top();
-    } catch (const std::exception& e) {
-        logSlicingPlacement("Exception in buildSlicingTree: " + string(e.what()));
+    }
+    catch (const std::bad_alloc& e) {
+        logSlicingPlacement("Memory allocation failed in buildSlicingTree: " + std::string(e.what()));
+        // Clear stack to help with cleanup
+        while (!nodeStack.empty()) {
+            nodeStack.pop();
+        }
         return nullptr;
-    } catch (...) {
+    }
+    catch (const std::exception& e) {
+        logSlicingPlacement("Exception in buildSlicingTree: " + std::string(e.what()));
+        // Clear stack to help with cleanup
+        while (!nodeStack.empty()) {
+            nodeStack.pop();
+        }
+        return nullptr;
+    }
+    catch (...) {
         logSlicingPlacement("Unknown exception in buildSlicingTree");
+        // Clear stack to help with cleanup
+        while (!nodeStack.empty()) {
+            nodeStack.pop();
+        }
         return nullptr;
     }
 }
@@ -1021,17 +1050,17 @@ void SimulatedAnnealing::setBlockPositions(SlicingTreeNode* node, int x, int y, 
     }
 }
 
-int SimulatedAnnealing::calculateCost(const vector<int>& expression, bool includeArea) {
+int SimulatedAnnealing::calculateCost(const std::vector<int>& expression, bool includeArea) {
     try {
-        SlicingTreeNode* root = buildSlicingTree(expression);
+        auto root = buildSlicingTree(expression);
         
-        if (root == nullptr || root->shapeRecords.empty()) {
+        if (!root || root->shapeRecords.empty()) {
             logSlicingPlacement("Error: Failed to build valid slicing tree or empty shape records");
-            return numeric_limits<int>::max();
+            return std::numeric_limits<int>::max();
         }
         
         // Find minimum area shape record
-        int minArea = numeric_limits<int>::max();
+        int minArea = std::numeric_limits<int>::max();
         int bestRecordIndex = 0;
         
         for (size_t i = 0; i < root->shapeRecords.size(); ++i) {
@@ -1047,7 +1076,7 @@ int SimulatedAnnealing::calculateCost(const vector<int>& expression, bool includ
         // For area optimization - use actual calculated area
         if (includeArea) {
             // Set block positions using best record
-            setBlockPositions(root, 0, 0, bestRecordIndex);
+            setBlockPositions(root.get(), 0, 0, bestRecordIndex);
             
             // Get bounding box of all blocks
             int minX = std::numeric_limits<int>::max();
@@ -1070,16 +1099,15 @@ int SimulatedAnnealing::calculateCost(const vector<int>& expression, bool includ
             minArea = (maxX - minX) * (maxY - minY);
         }
         
-        // Clean up
-        delete root;
+        // No need to manually delete root - shared_ptr handles cleanup
         
         return minArea;
     } catch (const std::exception& e) {
-        logSlicingPlacement("Exception in calculateCost: " + string(e.what()));
-        return numeric_limits<int>::max();
+        logSlicingPlacement("Exception in calculateCost: " + std::string(e.what()));
+        return std::numeric_limits<int>::max();
     } catch (...) {
         logSlicingPlacement("Unknown exception in calculateCost");
-        return numeric_limits<int>::max();
+        return std::numeric_limits<int>::max();
     }
 }
 

@@ -117,8 +117,9 @@ ShapeRecord::ShapeRecord(int w, int h, int lc, int rc)
 }
 
 // SlicingTreeNode implementation
-SlicingTreeNode::SlicingTreeNode()
-    : type(BLOCK), block(nullptr), leftChild(nullptr), rightChild(nullptr) {
+SlicingTreeNode::SlicingTreeNode() 
+    : type(BLOCK), block(nullptr), leftChild(nullptr), rightChild(nullptr), userData(nullptr) {
+
 }
 
 SlicingTreeNode::SlicingTreeNode(int type, Block* block)
@@ -132,7 +133,12 @@ SlicingTreeNode::SlicingTreeNode(int type, Block* block)
 }
 
 SlicingTreeNode::~SlicingTreeNode() {
-}
+        // Cleanup userData if it exists
+        if (userData) {
+            delete static_cast<std::vector<std::shared_ptr<SlicingTreeNode>>*>(userData);
+            userData = nullptr;
+        }
+    }
 
 void SlicingTreeNode::updateShapeRecords() {
     shapeRecords.clear();

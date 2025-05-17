@@ -149,8 +149,8 @@ public:
         );
         
         // Update internal layout
-        asfTree->pack();
-        updateBoundingBox();
+        // asfTree->pack();
+        // updateBoundingBox();
     }
     
     /**
