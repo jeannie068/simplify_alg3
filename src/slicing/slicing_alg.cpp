@@ -123,200 +123,124 @@ SimulatedAnnealing::~SimulatedAnnealing() {
 }
 
 void SimulatedAnnealing::run() {
-    try {
-        auto startTime = std::chrono::high_resolution_clock::now();
-        double globalTimeLimit = 180.0; // 3 minutes total time limit
+    auto startTime = std::chrono::high_resolution_clock::now();
+    double globalTimeLimit = 250.0; // 4 minutes total time limit
+    
+    logSlicingPlacement("Starting simulated annealing algorithm for analog placement...");
+    
+    // Generate initial expression
+    vector<int> expression = generateInitialExpression();
+    
+    // Calculate initial area
+    int area = calculateArea(expression);
+    logSlicingPlacement("Initial solution area: " + to_string(area));
+    
+    // Store multiple valid solutions for multi-start approach
+    vector<ValidSolution> validSolutions;
+    const int maxValidSolutions = 5; // Max number of valid solutions to store
+    
+    // PHASE 1: Generate initial valid placements
+    int attempt = 1;
+    const int maxAttempts = 10;
+    
+    while (validSolutions.size() < maxValidSolutions && attempt <= maxAttempts) {
+        // Check time remaining
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = currentTime - startTime;
+        double timeRemaining = globalTimeLimit - elapsed.count();
         
-        logSlicingPlacement("Starting simulated annealing algorithm for analog placement...");
-        
-        // Generate initial expression
-        logSlicingPlacement("Generating initial expression...");
-        vector<int> expression = generateInitialExpression();
-        
-        if (expression.empty()) {
-            logSlicingPlacement("ERROR: Initial expression generation failed. Using failsafe approach.");
-            // Create a simple chain of vertical cuts for fallback
-            for (int i = 0; i < data->getNumBlocks() - 1; ++i) {
-                expression.push_back(i);
-                expression.push_back(SlicingTreeNode::VERTICAL_CUT);
-            }
-            expression.push_back(data->getNumBlocks() - 1);
+        // Ensure we leave enough time for area optimization
+        if (timeRemaining < 60.0) {
+            logSlicingPlacement("Time limit approaching. Moving to area optimization.");
+            break;
         }
         
-        // Calculate initial area
-        logSlicingPlacement("Calculating initial area...");
-        int area = calculateArea(expression);
+        logSlicingPlacement("Initial valid placement attempt #" + to_string(attempt));
         
-        stringstream ss;
-        ss << "Initial solution area: " << area;
-        logSlicingPlacement(ss.str());
+        // First phase: Find a valid placement (no overlap)
+        // Run SA with focus on validity, not area optimization
+        auto result = runSimulatedAnnealing(expression, false, 500.0, 
+                                          0.1, 0.95, 10, 0.95, min(timeRemaining * 0.3, 60.0));
         
-        // Store multiple valid solutions for multi-start area optimization
-        vector<ValidSolution> validSolutions;
-        const int maxValidSolutions = 5; // Max number of valid solutions to store
+        expression = result.first;
+        int newArea = calculateArea(expression);
         
-        // PHASE 1: Generate initial valid placements
-        int attempt = 1;
+        logSlicingPlacement("Found placement with area: " + to_string(newArea));
         
-        while (validSolutions.size() < maxValidSolutions) {
-            // Check time remaining
-            auto currentTime = std::chrono::high_resolution_clock::now();
-            std::chrono::duration<double> elapsed = currentTime - startTime;
-            double timeRemaining = globalTimeLimit - elapsed.count();
-            
-            // Ensure we leave enough time for area optimization
-            if (timeRemaining < 180.0 || validSolutions.size() >= maxValidSolutions) {
-                logSlicingPlacement("Time limit approaching or enough valid solutions found. Moving to area optimization.");
-                break;
-            }
-            
-            ss.str("");
-            ss << "Initial valid placement attempt #" << attempt << " (remaining time: " << timeRemaining << "s)";
-            logSlicingPlacement(ss.str());
-            
-            // First phase: Find a valid placement (no overlap)
-            // Lower temperature for this phase to accept fewer uphill moves
-            auto result = runSimulatedAnnealing(expression, false, 500.0, 
-                                                0.1, 0.95, 10, 0.95, min(timeRemaining * 0.3, 60.0));
-                                                
-            expression = result.first;
-            int newArea = calculateArea(expression);
-            
-            ss.str("");
-            ss << "Found placement with area: " << newArea;
-            logSlicingPlacement(ss.str());
-            
-            // Add to our valid solutions
-            if (validSolutions.size() < maxValidSolutions) {
-                validSolutions.emplace_back(expression, newArea);
-                
-                // Sort solutions by area (best first)
-                std::sort(validSolutions.begin(), validSolutions.end());
-            } else {
-                // Replace the worst solution if this one is better
-                auto worstSolution = std::max_element(validSolutions.begin(), validSolutions.end());
-                if (newArea < worstSolution->area) {
-                    *worstSolution = ValidSolution(expression, newArea);
-                    // Re-sort solutions
-                    std::sort(validSolutions.begin(), validSolutions.end());
-                    
-                    ss.str("");
-                    ss << "Replaced a solution with better area: " << newArea;
-                    logSlicingPlacement(ss.str());
-                }
-            }
-            
-            // Try a new initial expression for diversity
-            expression = generateAlternativeExpression(attempt % 4);
-            attempt++;
-        }
+        // Add to our valid solutions
+        validSolutions.emplace_back(expression, newArea);
         
-        // PHASE 2: Area optimization using multi-start approach
-        if (!validSolutions.empty()) {
-            // Sort valid solutions by area (should already be sorted)
-            std::sort(validSolutions.begin(), validSolutions.end());
-            
-            ss.str("");
-            ss << "Found " << validSolutions.size() << " initial valid solutions with areas:";
-            for (const auto& sol : validSolutions) {
-                ss << " " << sol.area;
-            }
-            logSlicingPlacement(ss.str());
-            
-            // Get remaining time
-            auto currentTime = std::chrono::high_resolution_clock::now();
-            std::chrono::duration<double> elapsed = currentTime - startTime;
-            double remainingTime = globalTimeLimit - elapsed.count();
-            
-            // Calculate time for each area optimization attempt
-            double timePerAttempt = remainingTime / min(validSolutions.size(), (size_t)3);
-            
-            if (remainingTime > 30.0) {
-                logSlicingPlacement("Optimizing area with multi-start approach (" + to_string(remainingTime) + " seconds remaining)");
-                
-                int bestArea = numeric_limits<int>::max();
-                vector<int> bestAreaExpression;
-                
-                // Try the top 3 solutions (or all if we have fewer)
-                for (size_t i = 0; i < min(validSolutions.size(), (size_t)3); i++) {
-                    ss.str("");
-                    ss << "Area optimization attempt #" << (i+1) << " starting from solution with area=" 
-                       << validSolutions[i].area;
-                    logSlicingPlacement(ss.str());
-                    
-                    // Enhanced area optimization with more aggressive parameters
-                    double initTemp = 2000.0; // Higher temperature for more exploration
-                    double cooling = 0.97;    // Slower cooling to allow more exploration
-                    
-                    // Run area optimization
-                    auto result = runAreaOptimization(validSolutions[i].expression, 
-                                                     initTemp, cooling, timePerAttempt);
-                    
-                    // Check if this is better than our current best
-                    int newArea = calculateArea(result);
-                    ss.str("");
-                    ss << "Area optimization result: " << newArea 
-                       << " (started from " << validSolutions[i].area << ")";
-                    logSlicingPlacement(ss.str());
-                    
-                    if (newArea < bestArea) {
-                        bestArea = newArea;
-                        bestAreaExpression = result;
-                    }
-                }
-                
-                // Use the best area solution
-                expression = bestAreaExpression;
-                ss.str("");
-                ss << "Best area after optimization: " << bestArea;
-                logSlicingPlacement(ss.str());
-                
-            } else {
-                logSlicingPlacement("Not enough time for area optimization, using best valid solution.");
-                expression = validSolutions[0].expression;
-            }
-        } else {
-            logSlicingPlacement("Could not find valid solution. Attempting repair...");
-            
-            // Try to repair the solution
-            bestSolution->setPolishExpression(expression);
-            bestSolution->setCost(0);  // No cost for analog placement with no fixed outline
-            bestSolution->applyFloorplanToBlocks();
-            
-            if (repairFloorplan()) {
-                logSlicingPlacement("Successfully repaired floorplan to be valid!");
-            } else {
-                logSlicingPlacement("Could not repair floorplan to be fully valid.");
-            }
-        }
+        // Sort solutions by area (best first)
+        std::sort(validSolutions.begin(), validSolutions.end());
         
-        // Set the best solution
-        bestSolution->setPolishExpression(expression);
-        bestSolution->setCost(0);  // No cost for analog placement with no fixed outline
-        bestSolution->applyFloorplanToBlocks();
-        
-        // Final validation and reporting
-        bool isNonOverlapping = !hasOverlaps(bestSolution);
-        logSlicingPlacement("Final solution valid (no overlaps): " + string(isNonOverlapping ? "Yes" : "No"));
-        
-        int finalArea = calculateArea(expression);
-        ss.str("");
-        ss << "Final solution area: " << finalArea;
-        logSlicingPlacement(ss.str());
-        
-        // Report total runtime
-        auto endTime = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> totalElapsed = endTime - startTime;
-        logSlicingPlacement("Total algorithm runtime: " + to_string(totalElapsed.count()) + " seconds");
-        
-    } catch (const std::exception& e) {
-        logSlicingPlacement("Exception in run method: " + string(e.what()));
-        throw; // Re-throw to let the caller handle it
-    } catch (...) {
-        logSlicingPlacement("Unknown exception in run method");
-        throw; // Re-throw to let the caller handle it
+        // Try a new initial expression for diversity
+        expression = generateAlternativeExpression(attempt % 4);
+        attempt++;
     }
+    
+    // PHASE 2: Area optimization using multi-start approach
+    if (!validSolutions.empty()) {
+        // Get remaining time
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = currentTime - startTime;
+        double remainingTime = globalTimeLimit - elapsed.count();
+        
+        // Calculate time for each area optimization attempt
+        double timePerAttempt = remainingTime / min(validSolutions.size(), (size_t)3);
+        
+        if (remainingTime > 30.0) {
+            logSlicingPlacement("Optimizing area with multi-start approach (" + 
+                               to_string(remainingTime) + " seconds remaining)");
+            
+            int bestArea = numeric_limits<int>::max();
+            vector<int> bestAreaExpression;
+            
+            // Try the top 3 solutions (or all if we have fewer)
+            for (size_t i = 0; i < min(validSolutions.size(), (size_t)3); i++) {
+                logSlicingPlacement("Area optimization attempt #" + to_string(i+1) + 
+                                  " starting from solution with area=" + 
+                                  to_string(validSolutions[i].area));
+                
+                // Enhanced area optimization with more aggressive parameters
+                vector<int> result = runAreaOptimization(validSolutions[i].expression, 
+                                                       2000.0, // Higher temperature 
+                                                       0.97,   // Slower cooling
+                                                       timePerAttempt);
+                
+                // Check if this is better than our current best
+                int newArea = calculateArea(result);
+                logSlicingPlacement("Area optimization result: " + to_string(newArea));
+                
+                if (newArea < bestArea) {
+                    bestArea = newArea;
+                    bestAreaExpression = result;
+                }
+            }
+            
+            // Use the best area solution
+            expression = bestAreaExpression;
+        } else {
+            logSlicingPlacement("Not enough time for area optimization, using best valid solution.");
+            expression = validSolutions[0].expression;
+        }
+    }
+    
+    // Set the best solution
+    bestSolution->setPolishExpression(expression);
+    bestSolution->setCost(0);
+    bestSolution->applyFloorplanToBlocks();
+    
+    // Final validation and reporting
+    int finalArea = calculateArea(expression);
+    logSlicingPlacement("Final solution area: " + to_string(finalArea));
+    
+    // Report total runtime
+    auto endTime = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> totalElapsed = endTime - startTime;
+    logSlicingPlacement("Total algorithm runtime: " + to_string(totalElapsed.count()) + " seconds");
 }
+
+
 
 // Calculate weighted area of a solution
 int SimulatedAnnealing::calculateArea(const std::vector<int>& expression) {
@@ -373,13 +297,13 @@ int SimulatedAnnealing::calculateArea(const std::vector<int>& expression) {
     return totalArea;
 }
 
-// Method for area optimization with more sophisticated approach
+
 vector<int> SimulatedAnnealing::runAreaOptimization(
     const vector<int>& initialExpression, 
     double initialTemperature,
     double coolingRate,
-    double maxRuntime
-) {
+    double maxRuntime) 
+{
     auto startTime = std::chrono::high_resolution_clock::now();
     
     // Make a copy of the initial expression
@@ -409,7 +333,6 @@ vector<int> SimulatedAnnealing::runAreaOptimization(
         int tryingCount = 0;
         int uphillCount = 0;
         int acceptedCount = 0;
-        int rejectCount = 0;
         
         // Check runtime
         auto currentTime = std::chrono::high_resolution_clock::now();
@@ -421,10 +344,6 @@ vector<int> SimulatedAnnealing::runAreaOptimization(
         
         // Inner loop
         do {
-            if (elapsed.count() > maxRuntime) {
-                break;
-            }
-            
             // Choose move type - for area, M1 (operand swap) is most effective
             // Use 70% chance of M1 moves
             int moveType = (rand() % 100 < 70) ? 0 : (rand() % 3);
@@ -432,7 +351,6 @@ vector<int> SimulatedAnnealing::runAreaOptimization(
             
             // Skip if the move failed
             if (newExpression == expression) {
-                ++rejectCount;
                 ++tryingCount;
                 continue;
             }
@@ -461,13 +379,11 @@ vector<int> SimulatedAnnealing::runAreaOptimization(
                     bestExpression = expression;
                     
                     // Log significant improvements
-                    if (area < lastBestArea * 0.98) {
+                    if (area < lastBestArea * 0.95) {
                         logSlicingPlacement("Improved area to: " + to_string(bestArea));
                         lastBestArea = bestArea;
                     }
                 }
-            } else {
-                ++rejectCount;
             }
             
             // Check time limit periodically
@@ -500,33 +416,20 @@ vector<int> SimulatedAnnealing::runAreaOptimization(
             expression = bestExpression;
             area = bestArea;
             noImprovementCount = 0;
-            
-            logSlicingPlacement("Reheating to temperature " + to_string(temperature) + 
-                " and restarting from best solution (area=" + to_string(bestArea) + ")");
-        }
-        
-        // Terminate if acceptance ratio is too low
-        if (acceptedCount == 0 || static_cast<double>(acceptedCount) / tryingCount < 0.01) {
-            logSlicingPlacement("Terminating area optimization due to low acceptance ratio");
-            break;
         }
     }
     
-    // Final logging
-    auto endTime = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = endTime - startTime;
-    logSlicingPlacement("Area optimization completed in " + to_string(elapsed.count()) + 
-        "s. Best area: " + to_string(bestArea));
-    
     return bestExpression;
 }
+
 
 FloorplanSolution* SimulatedAnnealing::getBestSolution() const {
     return bestSolution;
 }
 
+
 vector<int> SimulatedAnnealing::generateInitialExpression() const {
-    // Improved initial expression generation specifically for analog placement
+    // Improved initial expression generation for analog placement
     vector<int> expression;
     
     // Sort blocks by area (descending)
@@ -543,23 +446,9 @@ vector<int> SimulatedAnnealing::generateInitialExpression() const {
                (blockB->getWidth() * blockB->getHeight());
     });
     
-    // For analog placement without fixed outline, use a balanced binary tree structure
+    // For analog placement, use a balanced binary tree structure
     // which tends to produce more compact placements
     expression = buildBalancedTree(sortedBlocks, 0, sortedBlocks.size() - 1, true);
-    
-    // Log the expression for debugging
-    stringstream ss;
-    ss << "Initial expression: ";
-    for (int val : expression) {
-        if (val == SlicingTreeNode::HORIZONTAL_CUT) {
-            ss << "H ";
-        } else if (val == SlicingTreeNode::VERTICAL_CUT) {
-            ss << "V ";
-        } else {
-            ss << val << " ";
-        }
-    }
-    logSlicingPlacement(ss.str());
     
     // Verify that the expression satisfies balloting property
     if (!validatePolishExpression(expression)) {
@@ -572,12 +461,12 @@ vector<int> SimulatedAnnealing::generateInitialExpression() const {
             expression.push_back(SlicingTreeNode::VERTICAL_CUT);
         }
         expression.push_back(sortedBlocks.back());
-        
-        logSlicingPlacement("Generated fallback expression");
     }
     
     return expression;
 }
+
+
 
 vector<int> SimulatedAnnealing::generateAlternativeExpression(int strategy) const {
     vector<int> expression;
@@ -756,12 +645,6 @@ bool SimulatedAnnealing::validatePolishExpression(const vector<int>& expression)
 }
 
 vector<int> SimulatedAnnealing::perturbExpression(const vector<int>& expression, int moveType) const {
-    // First, validate the input expression
-    if (expression.empty()) {
-        // logSlicingPlacement("Error: Empty expression in perturbExpression");
-        return expression;
-    }
-    
     // Create a copy for modification
     vector<int> newExpression = expression;
     
@@ -790,7 +673,7 @@ vector<int> SimulatedAnnealing::perturbExpression(const vector<int>& expression,
             
             // Try to find operands that are further apart for more diversity
             if (operandIndices.size() > 5) {
-                // Pick the operand with largest positional difference from multiple candidates
+                // Pick an operand with large positional difference
                 int maxDistance = 0;
                 for (int i = 0; i < 5; i++) {
                     size_t candidate = operandIndices[std::rand() % operandIndices.size()];
@@ -807,7 +690,6 @@ vector<int> SimulatedAnnealing::perturbExpression(const vector<int>& expression,
                     } while (idx1 == idx2);
                 }
             } else {
-                // For small expressions, simply pick a different operand
                 do {
                     idx2 = operandIndices[std::rand() % operandIndices.size()];
                 } while (idx1 == idx2);
@@ -837,7 +719,7 @@ vector<int> SimulatedAnnealing::perturbExpression(const vector<int>& expression,
                 }
             }
             
-            // If no chains found, revert to simpler approach - invert a single cut
+            // If no chains found, invert a single cut
             if (chainStarts.empty()) {
                 vector<size_t> cutIndices;
                 for (size_t i = 0; i < candidateExpression.size(); ++i) {
@@ -868,14 +750,14 @@ vector<int> SimulatedAnnealing::perturbExpression(const vector<int>& expression,
             }
         }
         else if (currentMoveType == 2) { // M3: Operator/Operand swap
-            // Find all adjacent operator-operand pairs that could be swapped
+            // Find adjacent operator-operand pairs that could be swapped
             vector<size_t> swapCandidates;
             for (size_t i = 0; i + 1 < candidateExpression.size(); ++i) {
-                // We need an operand and an operator adjacent to each other
+                // Need an operand and an operator adjacent to each other
                 if ((isCut(candidateExpression[i]) && !isCut(candidateExpression[i+1])) ||
                     (!isCut(candidateExpression[i]) && isCut(candidateExpression[i+1]))) {
                     
-                    // Try making the swap and check if it maintains a valid Polish expression
+                    // Try making the swap and check if it maintains validity
                     vector<int> testExpr = candidateExpression;
                     std::swap(testExpr[i], testExpr[i+1]);
                     
@@ -901,6 +783,7 @@ vector<int> SimulatedAnnealing::perturbExpression(const vector<int>& expression,
     // If all attempts failed, return the original expression
     return expression;
 }
+
 
 std::shared_ptr<SlicingTreeNode> SimulatedAnnealing::buildSlicingTree(const std::vector<int>& expression) {
     size_t cutIndex = 0;
@@ -1119,15 +1002,9 @@ pair<vector<int>, int> SimulatedAnnealing::runSimulatedAnnealing(
     double coolingRate,
     int movesPerTemperature,
     double maxRejectRatio,
-    double maxRuntime
-) {
+    double maxRuntime) 
+{
     auto startTime = std::chrono::high_resolution_clock::now();
-    
-    // Validate initial expression
-    if (!validatePolishExpression(expression)) {
-        logSlicingPlacement("Error: Invalid initial expression in simulated annealing");
-        return {expression, numeric_limits<int>::max()};
-    }
     
     int cost = calculateCost(expression, includeArea);
     
@@ -1137,17 +1014,12 @@ pair<vector<int>, int> SimulatedAnnealing::runSimulatedAnnealing(
     double temperature = initialTemperature;
     int maxTryingCount = movesPerTemperature * data->getNumBlocks();
     
-    // Simulated annealing parameters
-    const double logProbabilityThreshold = 0.01; // Controls early termination
+    // SA parameters
+    const double logProbabilityThreshold = 0.01;
     int stagnationCount = 0;
-    const int maxStagnationCount = 5; // Terminate after X iterations without improvement
+    const int maxStagnationCount = 5;
     
-    // Log initial state
-    logSlicingPlacement("Starting SA with T=" + to_string(temperature) + 
-        ", minT=" + to_string(minTemperature) + 
-        ", cooling=" + to_string(coolingRate));
-    
-    // Main simulated annealing loop
+    // Main SA loop
     while (temperature >= minTemperature && stagnationCount < maxStagnationCount) {
         int acceptedCount = 0;
         int tryingCount = 0;
@@ -1165,12 +1037,7 @@ pair<vector<int>, int> SimulatedAnnealing::runSimulatedAnnealing(
         
         // Inner loop - try perturbations at this temperature
         do {
-            if (elapsed.count() > maxRuntime) {
-                logSlicingPlacement("Runtime limit reached during move evaluation. Terminating.");
-                break;
-            }
-            
-            // Choose move type
+            // Choose move type based on optimization goal
             int moveType;
             if (includeArea) {
                 // For area optimization, prefer M1 (operand swap) and M2 (chain invert)
@@ -1182,7 +1049,7 @@ pair<vector<int>, int> SimulatedAnnealing::runSimulatedAnnealing(
             
             vector<int> newExpression = perturbExpression(expression, moveType);
             
-            // If perturbation failed to produce a different valid expression, try again
+            // If perturbation failed, try again
             if (newExpression == expression) {
                 ++rejectCount;
                 ++tryingCount;
@@ -1208,26 +1075,9 @@ pair<vector<int>, int> SimulatedAnnealing::runSimulatedAnnealing(
                     bestExpression = expression;
                     bestCost = cost;
                     improved = true;
-                    
-                    string qualityNote = "";
-                    if (cost < bestCost * 0.95) {
-                        qualityNote = " (significant improvement)";
-                    }
-                    
-                    logSlicingPlacement("New best cost: " + to_string(bestCost) + qualityNote);
                 }
             } else {
                 ++rejectCount;
-            }
-            
-            // Check time limit periodically
-            if (tryingCount % 100 == 0) {
-                currentTime = std::chrono::high_resolution_clock::now();
-                elapsed = currentTime - startTime;
-                if (elapsed.count() > maxRuntime) {
-                    logSlicingPlacement("Runtime limit reached during move evaluation. Terminating.");
-                    break;
-                }
             }
         } while (uphillCount <= maxTryingCount && tryingCount <= 2 * maxTryingCount);
         
@@ -1237,48 +1087,30 @@ pair<vector<int>, int> SimulatedAnnealing::runSimulatedAnnealing(
         } else {
             stagnationCount++;
             
-            // Reheat the temperature if stagnating but not yet at max count
+            // Reheat the temperature if stagnating
             if (stagnationCount > 0 && stagnationCount < maxStagnationCount) {
-                // Reheat with diminishing returns
                 temperature = initialTemperature * (0.8 - 0.1 * stagnationCount / maxStagnationCount);
-                logSlicingPlacement("Reheating to temperature " + to_string(temperature) + 
-                    " after stagnation (" + to_string(stagnationCount) + "/" + to_string(maxStagnationCount) + ")");
-                
-                continue; // Skip the normal cooling for this reheat iteration
+                continue;
             }
         }
         
         // Apply cooling
         temperature *= coolingRate;
         
-        // Termination condition - if acceptance ratio is too low
+        // Termination conditions
         double acceptanceRatio = (tryingCount > 0) ? static_cast<double>(acceptedCount) / tryingCount : 0;
         if (acceptanceRatio < logProbabilityThreshold || acceptedCount == 0) {
-            logSlicingPlacement("Terminating SA due to low acceptance ratio: " + to_string(acceptanceRatio));
             break;
         }
         
-        // Additional termination condition from original code
         if (static_cast<double>(rejectCount) / tryingCount > maxRejectRatio) {
-            logSlicingPlacement("Terminating SA due to high rejection ratio: " + 
-                to_string(static_cast<double>(rejectCount) / tryingCount));
             break;
         }
-    }
-    
-    // Log runtime statistics
-    auto endTime = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = endTime - startTime;
-    
-    if (elapsed.count() >= maxRuntime) {
-        logSlicingPlacement("Maximum runtime (" + to_string(maxRuntime) + "s) reached for this annealing run.");
-    } else {
-        logSlicingPlacement("Simulated annealing completed in " + to_string(elapsed.count()) + 
-            "s (stagnation count: " + to_string(stagnationCount) + ")");
     }
     
     return {bestExpression, bestCost};
 }
+
 
 bool SimulatedAnnealing::repairFloorplan() {
     logSlicingPlacement("Attempting to repair floorplan (remove overlaps)...");

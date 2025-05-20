@@ -73,7 +73,7 @@ private:
         double coolingRate,
         int movesPerTemperature,
         double maxRejectRatio,
-        double maxRuntime = 550.0
+        double maxRuntime = 180.0
     );
     
     // Method for wirelength optimization
